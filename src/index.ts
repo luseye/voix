@@ -7,6 +7,8 @@
 
 export const VERSION = "0.1.0";
 
+export * from "./frames/index.ts";
+
 if (import.meta.main) {
   console.log(`voix ${VERSION}`);
 }

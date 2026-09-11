@@ -90,3 +90,77 @@ let nextFrameId = 0;
 export function createFrame<T extends FrameBody>(body: T): T & { readonly id: number } {
   return { ...body, id: nextFrameId++ };
 }
+
+/**
+ * How a frame is scheduled relative to other frames.
+ *
+ * - `start` — the pipeline's opening frame, processed before everything else.
+ * - `system` — lifecycle, control, and speaking state, processed before data.
+ * - `default` — data frames, processed in arrival order.
+ */
+export type FrameTier = "start" | "system" | "default";
+
+/** Scheduling metadata for a frame kind. */
+interface FrameSpec {
+  /** Tier, which determines the frame's queue priority. */
+  readonly tier: FrameTier;
+  /** Whether an interruption may drop the frame from a queue. */
+  readonly interruptible: boolean;
+}
+
+/**
+ * Scheduling metadata for every frame kind.
+ *
+ * The `satisfies` clause makes this exhaustive: adding a kind to `FrameBody`
+ * without classifying it here is a compile error.
+ */
+const FRAME_SPECS = {
+  start: { tier: "start", interruptible: false },
+  end: { tier: "system", interruptible: false },
+  cancel: { tier: "system", interruptible: false },
+  interrupt: { tier: "system", interruptible: false },
+
+  userStartedSpeaking: { tier: "system", interruptible: false },
+  userStoppedSpeaking: { tier: "system", interruptible: false },
+  botStartedSpeaking: { tier: "system", interruptible: false },
+  botStoppedSpeaking: { tier: "system", interruptible: false },
+
+  inputAudio: { tier: "default", interruptible: true },
+  ttsAudio: { tier: "default", interruptible: true },
+  transcript: { tier: "default", interruptible: true },
+  llmText: { tier: "default", interruptible: true },
+  ttsText: { tier: "default", interruptible: true },
+
+  llmRun: { tier: "default", interruptible: true },
+} satisfies Record<FrameKind, FrameSpec>;
+
+/** Queue priority per tier. Lower values are dequeued first. */
+export const TIER_PRIORITY: Record<FrameTier, number> = {
+  start: 1,
+  system: 10,
+  default: 20,
+};
+
+/**
+ * Get a frame's queue priority.
+ *
+ * @param frame The frame to inspect.
+ * @returns The priority; lower values are dequeued first.
+ */
+export function framePriority(frame: Frame): number {
+  return TIER_PRIORITY[FRAME_SPECS[frame.kind].tier];
+}
+
+/**
+ * Whether an interruption may drop this frame from a queue.
+ *
+ * Lifecycle and speaking state frames survive an interruption so that a
+ * pipeline can still be stopped and a turn still recorded. Data frames are
+ * discarded, since they describe work that is no longer wanted.
+ *
+ * @param frame The frame to inspect.
+ * @returns `true` if the frame may be discarded on interruption.
+ */
+export function isInterruptible(frame: Frame): boolean {
+  return FRAME_SPECS[frame.kind].interruptible;
+}

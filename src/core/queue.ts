@@ -1,10 +1,16 @@
 /**
- * An asynchronous queue.
+ * An asynchronous queue with optional priority ordering.
  *
  * Producers `push` items; a consumer awaits `pop`. An empty queue suspends the
  * consumer until something arrives, so a processing loop can simply await its
  * next item instead of polling.
+ *
+ * Items leave in ascending priority order — lower values first. Items of equal
+ * priority leave in the order they arrived.
  */
+
+/** Extracts an item's priority. Lower values are dequeued first. */
+export type PriorityFn<T> = (item: T) => number;
 
 /** Raised when pushing to a queue that has been closed. */
 export class QueueClosedError extends Error {
@@ -14,19 +20,33 @@ export class QueueClosedError extends Error {
   }
 }
 
+interface Entry<T> {
+  readonly item: T;
+  readonly priority: number;
+}
+
 export class AsyncQueue<T> {
-  readonly #items: T[] = [];
+  readonly #entries: Entry<T>[] = [];
   readonly #waiters: ((item: T | undefined) => void)[] = [];
+  readonly #priorityOf: PriorityFn<T>;
   #closed = false;
+
+  /**
+   * @param priorityOf Extracts an item's priority. When omitted every item
+   * shares one priority, so the queue behaves as a plain FIFO.
+   */
+  constructor(priorityOf?: PriorityFn<T>) {
+    this.#priorityOf = priorityOf ?? (() => 0);
+  }
 
   /** Number of items waiting. */
   get size(): number {
-    return this.#items.length;
+    return this.#entries.length;
   }
 
   /** Whether no items are waiting. */
   get isEmpty(): boolean {
-    return this.#items.length === 0;
+    return this.#entries.length === 0;
   }
 
   /** Whether the queue has been closed. */
@@ -54,7 +74,7 @@ export class AsyncQueue<T> {
       return;
     }
 
-    this.#items.push(item);
+    this.#insert({ item, priority: this.#priorityOf(item) });
   }
 
   /**
@@ -63,10 +83,10 @@ export class AsyncQueue<T> {
    * @returns The next item, or `undefined` once the queue is closed and drained.
    */
   async pop(): Promise<T | undefined> {
-    if (this.#items.length > 0) {
-      // Non-null: the length check guarantees an item is present. Testing the
+    if (this.#entries.length > 0) {
+      // Non-null: the length check guarantees an entry is present. Testing the
       // shifted value instead would misfire if T itself admits undefined.
-      return this.#items.shift()!;
+      return this.#entries.shift()!.item;
     }
 
     if (this.#closed) {
@@ -92,6 +112,21 @@ export class AsyncQueue<T> {
     this.#closed = true;
     for (const waiter of this.#waiters.splice(0)) {
       waiter(undefined);
+    }
+  }
+
+  /**
+   * Place an entry after every entry of equal or lower priority.
+   *
+   * Scanning for the first strictly greater priority is what keeps items of
+   * equal priority in arrival order.
+   */
+  #insert(entry: Entry<T>): void {
+    const index = this.#entries.findIndex((existing) => existing.priority > entry.priority);
+    if (index === -1) {
+      this.#entries.push(entry);
+    } else {
+      this.#entries.splice(index, 0, entry);
     }
   }
 }

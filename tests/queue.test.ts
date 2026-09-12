@@ -54,6 +54,64 @@ describe("AsyncQueue", () => {
     });
   });
 
+  describe("priority", () => {
+    test("dequeues lower priority values first", async () => {
+      const queue = new AsyncQueue<string>((item) => (item === "low" ? 20 : 1));
+      queue.push("low");
+      queue.push("high");
+
+      expect(await queue.pop()).toBe("high");
+      expect(await queue.pop()).toBe("low");
+    });
+
+    test("orders across three priorities", async () => {
+      const rank: Record<string, number> = { data: 20, system: 10, start: 1 };
+      const queue = new AsyncQueue<string>((item) => rank[item]!);
+      queue.push("data");
+      queue.push("system");
+      queue.push("start");
+
+      expect(await queue.pop()).toBe("start");
+      expect(await queue.pop()).toBe("system");
+      expect(await queue.pop()).toBe("data");
+    });
+
+    test("keeps equal priority items in arrival order", async () => {
+      const queue = new AsyncQueue<string>(() => 1);
+      queue.push("first");
+      queue.push("second");
+      queue.push("third");
+
+      expect(await queue.pop()).toBe("first");
+      expect(await queue.pop()).toBe("second");
+      expect(await queue.pop()).toBe("third");
+    });
+
+    test("keeps arrival order within a priority band", async () => {
+      const queue = new AsyncQueue<string>((item) => (item.startsWith("data") ? 20 : 1));
+      queue.push("data-1");
+      queue.push("system-1");
+      queue.push("data-2");
+      queue.push("system-2");
+
+      expect(await queue.pop()).toBe("system-1");
+      expect(await queue.pop()).toBe("system-2");
+      expect(await queue.pop()).toBe("data-1");
+      expect(await queue.pop()).toBe("data-2");
+    });
+
+    test("ignores priority when handing off to a waiting consumer", async () => {
+      const queue = new AsyncQueue<string>((item) => (item === "low" ? 20 : 1));
+      const pending = queue.pop();
+
+      queue.push("low");
+
+      // Nothing is queued, so there is no ordering to apply.
+      expect(queue.size).toBe(0);
+      expect(await pending).toBe("low");
+    });
+  });
+
   describe("size", () => {
     test("counts waiting items", () => {
       const queue = new AsyncQueue<number>();

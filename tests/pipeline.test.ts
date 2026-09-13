@@ -20,6 +20,31 @@ class Stage extends FrameProcessor {
   }
 }
 
+/** Holds its first frame until released, so later frames queue behind it. */
+class Holding extends Stage {
+  holding = false;
+  #release: () => void = () => {};
+  #held: Promise<void> | undefined;
+
+  protected override async process(frame: Frame): Promise<void> {
+    if (this.#held === undefined) {
+      this.#held = new Promise<void>((resolve) => {
+        this.#release = resolve;
+      });
+      this.holding = true;
+      await this.#held;
+    }
+
+    await super.process(frame);
+  }
+
+  release(): void {
+    this.#release();
+  }
+}
+
+const RATES = { sampleRateIn: 16000, sampleRateOut: 24000 };
+
 /** Waits until a condition holds, so tests do not depend on timing. */
 async function until(predicate: () => boolean): Promise<void> {
   for (let i = 0; i < 200; i++) {
@@ -65,28 +90,121 @@ describe("Pipeline", () => {
     expect(pipeline.processors).toHaveLength(2);
   });
 
-  test("injects a frame at the head", async () => {
-    const first = new Stage("first");
-    const second = new Stage("second");
-    const pipeline = new Pipeline([first, second]);
-    const firstRunning = first.run();
-    const secondRunning = second.run();
+  describe("start", () => {
+    test("delivers the start frame to every stage", async () => {
+      const first = new Stage("first");
+      const second = new Stage("second");
+      const third = new Stage("third");
+      const pipeline = new Pipeline([first, second, third]);
 
-    pipeline.push(createFrame({ kind: "llmRun" }));
+      // Awaiting one loop before starting the next would deadlock here: the
+      // start frame would reach the head before anything downstream ran.
+      const running = pipeline.start(RATES);
+      expect(pipeline.isRunning).toBe(true);
+      await pipeline.stop();
+      await running;
 
-    await until(() => second.seen.length === 1);
-    expect(first.kinds).toEqual(["llmRun"]);
-    expect(second.kinds).toEqual(["llmRun"]);
+      for (const stage of [first, second, third]) {
+        expect(stage.seen[0]).toMatchObject({ kind: "start", ...RATES });
+        expect(stage.kinds).toEqual(["start", "end"]);
+      }
+      expect(pipeline.isRunning).toBe(false);
+    });
 
-    first.close();
-    second.close();
-    await Promise.all([firstRunning, secondRunning]);
+    test("rejects a second start", async () => {
+      const pipeline = new Pipeline([new Stage("only")]);
+      const running = pipeline.start(RATES);
+
+      expect(() => pipeline.start(RATES)).toThrow("already been started");
+
+      await pipeline.stop();
+      await running;
+    });
+
+    test("stops the other stages when one fails", async () => {
+      class Failing extends Stage {
+        protected override async process(frame: Frame): Promise<void> {
+          this.seen.push(frame);
+          throw new Error("boom");
+        }
+      }
+
+      const healthy = new Stage("healthy");
+      const failing = new Failing("failing");
+      const pipeline = new Pipeline([healthy, failing]);
+
+      await expect(pipeline.start(RATES)).rejects.toThrow("boom");
+      // The healthy stage would otherwise wait for frames that never arrive.
+      expect(healthy.isRunning).toBe(false);
+      expect(failing.isRunning).toBe(false);
+    });
   });
 
-  test("refuses a frame once the head has stopped", async () => {
-    const pipeline = new Pipeline([new Stage("only")]);
-    pipeline.head.close();
+  describe("push", () => {
+    test("injects a frame at the head", async () => {
+      const first = new Stage("first");
+      const second = new Stage("second");
+      const pipeline = new Pipeline([first, second]);
+      const running = pipeline.start(RATES);
 
-    expect(() => pipeline.push(createFrame({ kind: "llmRun" }))).toThrow(QueueClosedError);
+      pipeline.push(createFrame({ kind: "llmRun" }));
+      // The end frame outranks a data frame, so wait for delivery before
+      // stopping; otherwise the stop overtakes it and it is dropped.
+      await until(() => second.seen.length === 2);
+      await pipeline.stop();
+      await running;
+
+      expect(first.kinds).toEqual(["start", "llmRun", "end"]);
+      expect(second.kinds).toEqual(["start", "llmRun", "end"]);
+    });
+
+    test("drops a data frame that a stop overtakes", async () => {
+      const first = new Holding("first");
+      const second = new Stage("second");
+      const pipeline = new Pipeline([first, second]);
+      const running = pipeline.start(RATES);
+      await until(() => first.holding);
+
+      // Both frames queue while the first stage is held, so the end frame's
+      // higher tier decides the order rather than arrival.
+      pipeline.push(createFrame({ kind: "llmRun" }));
+      const stopping = pipeline.stop();
+      first.release();
+      await stopping;
+      await running;
+
+      expect(first.kinds).toEqual(["start", "end", "llmRun"]);
+      // The end frame closed this stage before the data frame could arrive, so
+      // forwarding it downstream reports a dropped frame rather than throwing.
+      expect(second.kinds).toEqual(["start", "end"]);
+    });
+
+    test("refuses a frame once stopped", async () => {
+      const pipeline = new Pipeline([new Stage("only")]);
+      const running = pipeline.start(RATES);
+      await pipeline.stop();
+      await running;
+
+      expect(() => pipeline.push(createFrame({ kind: "llmRun" }))).toThrow(QueueClosedError);
+    });
+  });
+
+  describe("stop", () => {
+    test("rejects when the pipeline was never started", async () => {
+      const pipeline = new Pipeline([new Stage("only")]);
+
+      await expect(pipeline.stop()).rejects.toThrow("has not been started");
+    });
+
+    test("is safe to call twice", async () => {
+      const pipeline = new Pipeline([new Stage("only")]);
+      const running = pipeline.start(RATES);
+
+      await pipeline.stop();
+      await pipeline.stop();
+      await running;
+
+      expect(pipeline.isRunning).toBe(false);
+    });
   });
 });

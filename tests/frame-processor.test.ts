@@ -151,6 +151,17 @@ describe("FrameProcessor", () => {
       expect(lonely.push(createFrame({ kind: "llmRun" }))).toBe(false);
       expect(lonely.push(createFrame({ kind: "llmRun" }), "up")).toBe(false);
     });
+
+    test("reports a dropped frame when the neighbour has stopped", () => {
+      const source = new Sink("source");
+      const target = new Sink("target");
+      source.link(target);
+      target.close();
+
+      // Shutting down is not a failure: a frame in flight reaches a neighbour
+      // that has already stopped.
+      expect(source.push(createFrame({ kind: "llmRun" }))).toBe(false);
+    });
   });
 
   describe("run", () => {

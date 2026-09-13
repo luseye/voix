@@ -13,7 +13,7 @@
  */
 
 import { type Direction, type Frame, framePriority } from "../frames/index.ts";
-import { AsyncQueue } from "./queue.ts";
+import { AsyncQueue, QueueClosedError } from "./queue.ts";
 
 export abstract class FrameProcessor {
   /** A label used in logs and error messages. */
@@ -82,9 +82,9 @@ export abstract class FrameProcessor {
    *
    * @param frame The frame to send.
    * @param direction `down` towards the output, `up` towards the input.
-   * @returns `false` when there is no neighbour that way, so the frame was
-   *   dropped. Either end of a pipeline is a normal place to run out of
-   *   neighbours, not an error.
+   * @returns `false` when the frame was dropped, either because there is no
+   *   neighbour that way or because the neighbour has already stopped. Both
+   *   are normal while a pipeline shuts down, so neither is an error.
    */
   push(frame: Frame, direction: Direction = "down"): boolean {
     const target = direction === "down" ? this.#next : this.#prev;
@@ -92,7 +92,17 @@ export abstract class FrameProcessor {
       return false;
     }
 
-    target.enqueue(frame);
+    try {
+      target.enqueue(frame);
+    } catch (error) {
+      // A stopped neighbour is not a failure: frames queued behind a system
+      // frame such as `end` arrive after it has already closed downstream.
+      if (error instanceof QueueClosedError) {
+        return false;
+      }
+      throw error;
+    }
+
     return true;
   }
 

@@ -4,12 +4,15 @@
  * A processor owns a priority queue and a main loop. The loop awaits the next
  * frame and hands it to `process`, which a subclass implements.
  *
+ * Processors sit in a doubly linked list, so a frame can travel towards the
+ * output (`down`) or back towards the input (`up`).
+ *
  * The rule that matters most: `process` runs on the loop, so slow work inside
  * it stalls every frame behind it. Anything that outlives the frame which
  * triggered it does not belong there.
  */
 
-import { type Frame, framePriority } from "../frames/index.ts";
+import { type Direction, type Frame, framePriority } from "../frames/index.ts";
 import { AsyncQueue } from "./queue.ts";
 
 export abstract class FrameProcessor {
@@ -17,6 +20,8 @@ export abstract class FrameProcessor {
   readonly name: string;
 
   readonly #queue = new AsyncQueue<Frame>(framePriority);
+  #next: FrameProcessor | undefined;
+  #prev: FrameProcessor | undefined;
   #running = false;
 
   /**
@@ -26,9 +31,31 @@ export abstract class FrameProcessor {
     this.name = name ?? this.constructor.name;
   }
 
+  /** The processor downstream, if linked. */
+  get next(): FrameProcessor | undefined {
+    return this.#next;
+  }
+
+  /** The processor upstream, if linked. */
+  get prev(): FrameProcessor | undefined {
+    return this.#prev;
+  }
+
   /** Whether the main loop is running. */
   get isRunning(): boolean {
     return this.#running;
+  }
+
+  /**
+   * Link `next` downstream of this processor.
+   *
+   * Assumes `next` is not already linked below another processor.
+   *
+   * @param next The processor to place downstream.
+   */
+  link(next: FrameProcessor): void {
+    this.#next = next;
+    next.#prev = this;
   }
 
   /** The number of frames waiting to be handled. */
@@ -44,6 +71,29 @@ export abstract class FrameProcessor {
    */
   enqueue(frame: Frame): void {
     this.#queue.push(frame);
+  }
+
+  /**
+   * Send a frame to the neighbour in `direction`.
+   *
+   * This only queues the frame and returns; it does not wait for the neighbour
+   * to handle it. Waiting here would make one slow processor hold up the whole
+   * pipeline, which is what queueing exists to avoid.
+   *
+   * @param frame The frame to send.
+   * @param direction `down` towards the output, `up` towards the input.
+   * @returns `false` when there is no neighbour that way, so the frame was
+   *   dropped. Either end of a pipeline is a normal place to run out of
+   *   neighbours, not an error.
+   */
+  push(frame: Frame, direction: Direction = "down"): boolean {
+    const target = direction === "down" ? this.#next : this.#prev;
+    if (target === undefined) {
+      return false;
+    }
+
+    target.enqueue(frame);
+    return true;
   }
 
   /**

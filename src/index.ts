@@ -8,6 +8,7 @@
 export const VERSION = "0.1.0";
 
 export * from "./core/frame-processor.ts";
+export * from "./core/pipeline.ts";
 export * from "./core/queue.ts";
 export * from "./frames/index.ts";
 

@@ -20,6 +20,8 @@ export abstract class FrameProcessor {
   readonly name: string;
 
   readonly #queue = new AsyncQueue<Frame>(framePriority);
+  readonly #tasks = new Set<Promise<void>>();
+  #abort = new AbortController();
   #next: FrameProcessor | undefined;
   #prev: FrameProcessor | undefined;
   #running = false;
@@ -107,11 +109,69 @@ export abstract class FrameProcessor {
   }
 
   /**
+   * The signal for work started by `createTask`.
+   *
+   * Hand it to anything that supports cancellation — `fetch`, a WebSocket
+   * handshake — so that stopping this processor actually stops that work.
+   */
+  get signal(): AbortSignal {
+    return this.#abort.signal;
+  }
+
+  /**
+   * Run work that outlives the frame which triggered it.
+   *
+   * This is the only place for slow work. `process` runs on the main loop, so
+   * anything awaited there stalls every frame behind it; a task runs alongside
+   * the loop instead. The task receives the processor's signal and should pass
+   * it to whatever it awaits, so that aborting actually stops it.
+   *
+   * Stopping the processor aborts in-flight tasks and waits for them, so a
+   * task is never still running once the loop has reported that it stopped.
+   *
+   * Failures are the task author's to handle on the returned promise. A
+   * rejection is not reported as unhandled, since a task is often started
+   * without being awaited.
+   *
+   * @param task The work to run, given the processor's signal.
+   * @returns The task's own promise, for awaiting its result or its failure.
+   */
+  createTask<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const promise = task(this.#abort.signal);
+
+    // Track a copy that never rejects: shutdown waits on the set, and it must
+    // not throw because one task failed. Attaching these handlers is also what
+    // keeps an ignored rejection from being reported as unhandled.
+    const tracked = promise.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#tasks.add(tracked);
+    void tracked.finally(() => {
+      this.#tasks.delete(tracked);
+    });
+
+    return promise;
+  }
+
+  /**
+   * Abort in-flight work and start a new turn.
+   *
+   * Tasks started before this call see their signal abort; tasks started after
+   * it get a fresh one. Dropping queued frames is a separate step, so a caller
+   * that wants a full interruption does both.
+   */
+  interrupt(): void {
+    this.#abort.abort();
+    this.#abort = new AbortController();
+  }
+
+  /**
    * Handle one frame.
    *
    * Runs on the main loop, so it must return promptly: a slow `process` holds
    * up every frame behind it. Anything that outlives the frame which triggered
-   * it belongs somewhere other than here.
+   * it belongs in `createTask` instead.
    *
    * @param frame The frame to handle.
    */
@@ -153,6 +213,11 @@ export abstract class FrameProcessor {
       // This runs after a thrown frame too, so a failed loop never leaves
       // producers pushing into a queue that nobody reads.
       this.#queue.close();
+
+      // Abort in-flight work and wait for it. Without the wait, a task could
+      // still be running after the loop has reported that it stopped.
+      this.#abort.abort();
+      await Promise.all(this.#tasks);
     }
   }
 

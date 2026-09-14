@@ -12,6 +12,7 @@ export * from "./core/frame-processor.ts";
 export * from "./core/pipeline.ts";
 export * from "./core/queue.ts";
 export * from "./frames/index.ts";
+export * from "./transports/websocket-input.ts";
 
 if (import.meta.main) {
   console.log(`voix ${VERSION}`);

@@ -12,6 +12,7 @@
  * way. Both cases are the same buffer: bytes that cannot be converted yet.
  */
 
+import { readSamples } from "../audio/pcm.ts";
 import { LinearResampler } from "../audio/resample.ts";
 import { FrameProcessor } from "../core/frame-processor.ts";
 import { createFrame, type Frame } from "../frames/index.ts";
@@ -30,24 +31,6 @@ function concat(left: Uint8Array, right: Uint8Array): Uint8Array {
   joined.set(left, 0);
   joined.set(right, left.length);
   return joined;
-}
-
-/**
- * Reads the first `length` bytes as little-endian 16-bit samples.
- *
- * The byte order is stated rather than assumed: an `Int16Array` view would use
- * the platform's order, which is little-endian everywhere this is likely to
- * run but is not guaranteed to be.
- */
-function readSamples(bytes: Uint8Array, length: number): Int16Array {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, length);
-  const samples = new Int16Array(length / 2);
-
-  for (let i = 0; i < samples.length; i++) {
-    samples[i] = view.getInt16(i * 2, true);
-  }
-
-  return samples;
 }
 
 export class WebSocketInput extends FrameProcessor {

@@ -56,6 +56,35 @@ src/
 └── audio/        Voice activity detection, resampling
 ```
 
+## WebSocket transport
+
+A client connects, sends raw 16-bit mono PCM in little-endian byte order, and
+receives the same back. Sample rates are handled at the transport boundary, so
+everything inside the pipeline is one format.
+
+```ts
+const server = new WebSocketServer(
+  { sampleRateIn: 16000, sampleRateOut: 24000 },
+  (transport) => new Pipeline([transport.input, transport.output]),
+);
+
+serve(server, { port: 8080, path: "/voice" });
+```
+
+A client then sends binary audio frames and JSON control messages:
+
+```jsonc
+{ "type": "llmRun" }   // ask the pipeline to run the language model
+```
+
+`examples/echo-server.ts` is a runnable version that echoes audio back, so the
+transport can be tried without an API key:
+
+```bash
+bun run examples/echo-server.ts
+wscat -c ws://localhost:8080/voice
+```
+
 ## Testing
 
 ```bash

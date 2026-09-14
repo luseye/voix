@@ -126,6 +126,66 @@ describe("AsyncQueue", () => {
     });
   });
 
+  describe("removeWhere", () => {
+    test("removes matching items and reports how many", () => {
+      const queue = new AsyncQueue<number>();
+      queue.push(1);
+      queue.push(2);
+      queue.push(3);
+      queue.push(4);
+
+      const removed = queue.removeWhere((item) => item % 2 === 0);
+
+      expect(removed).toBe(2);
+      expect(queue.size).toBe(2);
+    });
+
+    test("keeps the surviving items in order", async () => {
+      const queue = new AsyncQueue<string>();
+      queue.push("keep-1");
+      queue.push("drop-1");
+      queue.push("keep-2");
+      queue.push("drop-2");
+      queue.push("keep-3");
+
+      queue.removeWhere((item) => item.startsWith("drop"));
+
+      expect(await queue.pop()).toBe("keep-1");
+      expect(await queue.pop()).toBe("keep-2");
+      expect(await queue.pop()).toBe("keep-3");
+    });
+
+    test("removes nothing when nothing matches", () => {
+      const queue = new AsyncQueue<number>();
+      queue.push(1);
+      queue.push(2);
+
+      expect(queue.removeWhere(() => false)).toBe(0);
+      expect(queue.size).toBe(2);
+    });
+
+    test("removes everything when all match", () => {
+      const queue = new AsyncQueue<number>();
+      queue.push(1);
+      queue.push(2);
+
+      expect(queue.removeWhere(() => true)).toBe(2);
+      expect(queue.isEmpty).toBe(true);
+    });
+
+    test("leaves a waiting consumer undisturbed", async () => {
+      const queue = new AsyncQueue<number>();
+      const pending = queue.pop();
+
+      expect(queue.removeWhere(() => true)).toBe(0);
+
+      // A consumer only waits while the queue is empty, so there is nothing
+      // to remove and the wait must still be honoured.
+      queue.push(1);
+      expect(await pending).toBe(1);
+    });
+  });
+
   describe("close", () => {
     test("drains queued items before returning undefined", async () => {
       const queue = new AsyncQueue<number>();

@@ -12,7 +12,7 @@
  * triggered it does not belong there.
  */
 
-import { type Direction, type Frame, framePriority } from "../frames/index.ts";
+import { type Direction, type Frame, framePriority, isInterruptible } from "../frames/index.ts";
 import { AsyncQueue, QueueClosedError } from "./queue.ts";
 
 export abstract class FrameProcessor {
@@ -155,15 +155,21 @@ export abstract class FrameProcessor {
   }
 
   /**
-   * Abort in-flight work and start a new turn.
+   * Abort in-flight work and drop queued work, starting a new turn.
    *
    * Tasks started before this call see their signal abort; tasks started after
-   * it get a fresh one. Dropping queued frames is a separate step, so a caller
-   * that wants a full interruption does both.
+   * it get a fresh one. Queued frames that an interruption may discard are
+   * removed, while lifecycle and speaking state frames stay: they describe
+   * where the pipeline is, not work that is now unwanted. The frame being
+   * handled right now is untouched, since it is no longer in the queue.
+   *
+   * @returns How many queued frames were dropped.
    */
-  interrupt(): void {
+  interrupt(): number {
     this.#abort.abort();
     this.#abort = new AbortController();
+
+    return this.#queue.removeWhere((frame) => isInterruptible(frame));
   }
 
   /**

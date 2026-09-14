@@ -189,6 +189,46 @@ describe("Pipeline", () => {
     });
   });
 
+  describe("interrupt", () => {
+    test("aborts the work of every stage", async () => {
+      const first = new Stage("first");
+      const second = new Stage("second");
+      const pipeline = new Pipeline([first, second]);
+      const running = pipeline.start(RATES);
+
+      const signals = [first.signal, second.signal];
+      pipeline.interrupt();
+
+      // Visiting the stages directly is what makes this total: no stage can be
+      // skipped because a broadcast frame failed to reach it.
+      for (const signal of signals) {
+        expect(signal.aborted).toBe(true);
+      }
+
+      await pipeline.stop();
+      await running;
+    });
+
+    test("totals the frames dropped across the stages", async () => {
+      const first = new Holding("first");
+      const pipeline = new Pipeline([first, new Stage("second")]);
+      const running = pipeline.start(RATES);
+      await until(() => first.holding);
+
+      // Queued behind the held frame, so there is something to drop.
+      pipeline.push(createFrame({ kind: "llmText", text: "one" }));
+      pipeline.push(createFrame({ kind: "llmText", text: "two" }));
+      await until(() => first.queueSize === 2);
+
+      expect(pipeline.interrupt()).toBe(2);
+      expect(first.queueSize).toBe(0);
+
+      first.release();
+      await pipeline.stop();
+      await running;
+    });
+  });
+
   describe("stop", () => {
     test("rejects when the pipeline was never started", async () => {
       const pipeline = new Pipeline([new Stage("only")]);

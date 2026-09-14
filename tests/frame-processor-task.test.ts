@@ -89,6 +89,62 @@ describe("FrameProcessor", () => {
       expect(sink.signal.aborted).toBe(false);
       expect(sink.signal).not.toBe(before);
     });
+
+    test("drops queued data frames", () => {
+      const sink = new Sink("sink");
+      sink.enqueue(createFrame({ kind: "inputAudio", data: new Int16Array(0) }));
+      sink.enqueue(createFrame({ kind: "llmText", text: "hi" }));
+      sink.enqueue(createFrame({ kind: "ttsAudio", data: new Int16Array(0) }));
+
+      expect(sink.interrupt()).toBe(3);
+      expect(sink.queueSize).toBe(0);
+    });
+
+    test("keeps queued lifecycle and speaking state frames", async () => {
+      const sink = new Sink("sink");
+      sink.enqueue(createFrame({ kind: "userStartedSpeaking" }));
+      sink.enqueue(createFrame({ kind: "llmText", text: "hi" }));
+      sink.enqueue(createFrame({ kind: "end" }));
+
+      expect(sink.interrupt()).toBe(1);
+
+      // A turn's state frames outlive the turn: the pipeline still has to know
+      // that the user is speaking, and still has to be stoppable.
+      await sink.run();
+      expect(sink.seen.map((frame) => frame.kind)).toEqual(["userStartedSpeaking", "end"]);
+    });
+
+    test("leaves the frame being handled alone", async () => {
+      let release: () => void = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered = false;
+
+      class Holding extends Sink {
+        protected override async process(frame: Frame): Promise<void> {
+          entered = true;
+          await held;
+          await super.process(frame);
+        }
+      }
+
+      const sink = new Holding("sink");
+      sink.enqueue(createFrame({ kind: "llmText", text: "first" }));
+      const running = sink.run();
+      await until(() => entered);
+
+      sink.enqueue(createFrame({ kind: "llmText", text: "second" }));
+      expect(sink.interrupt()).toBe(1);
+
+      release();
+      sink.close();
+      await running;
+
+      // The frame in flight is no longer queued, so it runs to completion.
+      expect(sink.seen).toHaveLength(1);
+      expect(sink.seen[0]).toMatchObject({ kind: "llmText", text: "first" });
+    });
   });
 
   describe("shutdown", () => {

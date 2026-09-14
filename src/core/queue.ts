@@ -99,6 +99,30 @@ export class AsyncQueue<T> {
   }
 
   /**
+   * Remove every waiting item that matches a predicate.
+   *
+   * Used to drop work that an interruption has made irrelevant. Items already
+   * handed to a consumer are unaffected: a waiting consumer only exists while
+   * the queue is empty, so removing entries can never disturb one.
+   *
+   * @param predicate Returns `true` for the items to drop.
+   * @returns How many items were removed.
+   */
+  removeWhere(predicate: (item: T) => boolean): number {
+    let removed = 0;
+
+    // Backwards, so the indices ahead of the cursor stay valid as items go.
+    for (let i = this.#entries.length - 1; i >= 0; i--) {
+      if (predicate(this.#entries[i]!.item)) {
+        this.#entries.splice(i, 1);
+        removed++;
+      }
+    }
+
+    return removed;
+  }
+
+  /**
    * Close the queue.
    *
    * Items already queued stay available, so a consumer drains what is left

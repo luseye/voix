@@ -70,6 +70,24 @@ export class Pipeline {
   }
 
   /**
+   * Interrupt every stage, aborting in-flight work and dropping queued work.
+   *
+   * Every stage is visited directly rather than the interrupt travelling as a
+   * frame: a broadcast frame would need a rule against looping back on itself,
+   * and a stage that fails to forward it would leave the rest of the pipeline
+   * running. Visiting the stages is predictable and cannot be cut short.
+   *
+   * @returns The total number of queued frames dropped.
+   */
+  interrupt(): number {
+    let dropped = 0;
+    for (const processor of this.#processors) {
+      dropped += processor.interrupt();
+    }
+    return dropped;
+  }
+
+  /**
    * Start every stage and inject the start frame.
    *
    * The loops all start together, before the start frame is injected.

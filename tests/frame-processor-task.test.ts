@@ -147,6 +147,66 @@ describe("FrameProcessor", () => {
     });
   });
 
+  describe("createSessionTask", () => {
+    test("runs the task, passing a signal distinct from the turn signal", async () => {
+      const sink = new Sink("sink");
+
+      const [sessionAborted, turnAborted] = await sink.createSessionTask(async (signal) => [
+        signal.aborted,
+        sink.signal.aborted,
+      ]);
+
+      expect(sessionAborted).toBe(false);
+      expect(turnAborted).toBe(false);
+    });
+
+    test("survives an interruption", async () => {
+      const sink = new Sink("sink");
+      const record = { aborted: false };
+      sink.createSessionTask(abortable(record));
+
+      sink.interrupt();
+
+      // A session-scoped connection must outlive the interruption it reported,
+      // so interrupting must not abort it.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(record.aborted).toBe(false);
+      expect(sink.sessionSignal.aborted).toBe(false);
+    });
+
+    test("is aborted by shutdown", async () => {
+      const sink = new Sink("sink");
+      const record = { aborted: false };
+      sink.createSessionTask(abortable(record));
+
+      const running = sink.run();
+      sink.close();
+
+      await running;
+      expect(record.aborted).toBe(true);
+    });
+
+    test("does not settle while a session task is still running", async () => {
+      const sink = new Sink("sink");
+      const gate = deferred();
+      sink.createSessionTask(() => gate.promise);
+
+      const running = sink.run();
+      sink.close();
+      let settled = false;
+      void running.then(() => {
+        settled = true;
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(settled).toBe(false);
+
+      gate.resolve();
+      await running;
+      expect(settled).toBe(true);
+    });
+  });
+
   describe("shutdown", () => {
     test("aborts in-flight tasks and waits for them", async () => {
       const sink = new Sink("sink");

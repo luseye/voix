@@ -209,6 +209,23 @@ describe("Pipeline", () => {
       await running;
     });
 
+    test("leaves session-scoped work running", async () => {
+      const first = new Stage("first");
+      const second = new Stage("second");
+      const pipeline = new Pipeline([first, second]);
+      const running = pipeline.start(RATES);
+
+      // A transcription connection spans the session, so the interruption it
+      // reported must not be what closes it.
+      pipeline.interrupt();
+
+      expect(first.sessionSignal.aborted).toBe(false);
+      expect(second.sessionSignal.aborted).toBe(false);
+
+      await pipeline.stop();
+      await running;
+    });
+
     test("totals the frames dropped across the stages", async () => {
       const first = new Holding("first");
       const pipeline = new Pipeline([first, new Stage("second")]);

@@ -22,6 +22,7 @@ export abstract class FrameProcessor {
   readonly #queue = new AsyncQueue<Frame>(framePriority);
   readonly #tasks = new Set<Promise<void>>();
   #abort = new AbortController();
+  readonly #sessionAbort = new AbortController();
   #next: FrameProcessor | undefined;
   #prev: FrameProcessor | undefined;
   #running = false;
@@ -113,9 +114,26 @@ export abstract class FrameProcessor {
    *
    * Hand it to anything that supports cancellation — `fetch`, a WebSocket
    * handshake — so that stopping this processor actually stops that work.
+   *
+   * This signal is aborted by an interruption as well as by shutdown, so it
+   * belongs to work that is scoped to one turn: a request that should be
+   * cancelled when the user talks over the reply. Work that has to outlive an
+   * interruption belongs on `sessionSignal` instead.
    */
   get signal(): AbortSignal {
     return this.#abort.signal;
+  }
+
+  /**
+   * The signal for work started by `createSessionTask`.
+   *
+   * Aborted only when the processor stops, never by an interruption. A
+   * transcription connection spans the whole session: cancelling it because
+   * the user interrupted would stop transcribing the very speech that
+   * interrupted, so it is out of scope for `interrupt`.
+   */
+  get sessionSignal(): AbortSignal {
+    return this.#sessionAbort.signal;
   }
 
   /**
@@ -137,8 +155,29 @@ export abstract class FrameProcessor {
    * @returns The task's own promise, for awaiting its result or its failure.
    */
   createTask<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> {
-    const promise = task(this.#abort.signal);
+    return this.#track(task(this.#abort.signal));
+  }
 
+  /**
+   * Run work that lasts as long as the session does.
+   *
+   * The counterpart to `createTask` for connections and other resources that
+   * span the whole session. Such work is aborted when the processor stops but
+   * not when it is interrupted: a transcription connection has to survive the
+   * interruption it just reported, or the user's next words go unrecorded.
+   *
+   * Shutdown still waits for these, so a connection is not left open once the
+   * loop has reported that it stopped.
+   *
+   * @param task The work to run, given the session signal.
+   * @returns The task's own promise, for awaiting its result or its failure.
+   */
+  createSessionTask<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    return this.#track(task(this.#sessionAbort.signal));
+  }
+
+  /** Track a task so shutdown waits for it without a rejection escaping. */
+  #track<T>(promise: Promise<T>): Promise<T> {
     // Track a copy that never rejects: shutdown waits on the set, and it must
     // not throw because one task failed. Attaching these handlers is also what
     // keeps an ignored rejection from being reported as unhandled.
@@ -221,8 +260,11 @@ export abstract class FrameProcessor {
       this.#queue.close();
 
       // Abort in-flight work and wait for it. Without the wait, a task could
-      // still be running after the loop has reported that it stopped.
+      // still be running after the loop has reported that it stopped. Both
+      // signals are aborted: interruption has already handled the turn-scoped
+      // one, but the session-scoped one is only ever aborted here.
       this.#abort.abort();
+      this.#sessionAbort.abort();
       await Promise.all(this.#tasks);
     }
   }

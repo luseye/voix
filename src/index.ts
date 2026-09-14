@@ -13,6 +13,7 @@ export * from "./core/frame-processor.ts";
 export * from "./core/pipeline.ts";
 export * from "./core/queue.ts";
 export * from "./frames/index.ts";
+export * from "./services/base.ts";
 export * from "./transports/serve.ts";
 export * from "./transports/socket.ts";
 export * from "./transports/websocket-input.ts";

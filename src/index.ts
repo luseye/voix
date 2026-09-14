@@ -7,6 +7,7 @@
 
 export const VERSION = "0.1.0";
 
+export * from "./audio/resample.ts";
 export * from "./core/frame-processor.ts";
 export * from "./core/pipeline.ts";
 export * from "./core/queue.ts";

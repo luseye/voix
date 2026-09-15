@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { FrameProcessor } from "../src/core/frame-processor.ts";
 import { Pipeline } from "../src/core/pipeline.ts";
 import { createFrame, type Frame } from "../src/frames/index.ts";
 import {
@@ -104,24 +105,23 @@ describe("AIService", () => {
       const pipeline = new Pipeline([service]);
       const running = pipeline.start(RATES);
 
-      await until(() => service.handled.length === 1);
-      expect(service.handled[0]).toMatchObject({ kind: "start" });
+      // The start frame is consumed by `connect`, not `handle`: the connection
+      // is built from it, and handing it on would forward it twice.
+      await until(() => service.started !== undefined);
+      expect(service.started).toMatchObject({ sampleRateIn: 16000, sampleRateOut: 24000 });
+      expect(service.handled).toHaveLength(0);
 
       await pipeline.stop();
       await running;
     });
 
-    test("forwards the start frame downstream", async () => {
+    test("forwards the start frame downstream exactly once", async () => {
       const service = new TestService();
       const seen: Frame[] = [];
 
-      class Sink extends AIService {
-        protected override connect(): Promise<ServiceConnection> {
-          return Promise.resolve(new FakeConnection());
-        }
-        protected override async handle(frame: Frame): Promise<void> {
+      class Sink extends FrameProcessor {
+        protected override async process(frame: Frame): Promise<void> {
           seen.push(frame);
-          this.push(frame);
         }
       }
 
@@ -129,9 +129,13 @@ describe("AIService", () => {
       const pipeline = new Pipeline([service, sink]);
       const running = pipeline.start(RATES);
 
-      // The start frame must keep travelling: a later stage needs the rates.
-      await until(() => seen.some((frame) => frame.kind === "start"));
-      expect(seen[0]).toMatchObject({ kind: "start" });
+      // A later stage opens its own connection from the rates, so the start
+      // frame has to keep travelling — and only once, since `connect` already
+      // received it and forwarding it twice would duplicate it downstream.
+      await until(() => seen.length === 1);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(seen.map((frame) => frame.kind)).toEqual(["start"]);
 
       await pipeline.stop();
       await running;
@@ -141,7 +145,7 @@ describe("AIService", () => {
       const service = new TestService();
       const pipeline = new Pipeline([service]);
       const running = pipeline.start(RATES);
-      await until(() => service.handled.length === 1);
+      await until(() => service.started !== undefined);
 
       await pipeline.stop();
       await running;
@@ -153,7 +157,7 @@ describe("AIService", () => {
       const service = new TestService();
       const pipeline = new Pipeline([service]);
       const running = pipeline.start(RATES);
-      await until(() => service.handled.length === 1);
+      await until(() => service.started !== undefined);
 
       // A transcription connection spans the session, so the interruption it
       // reported must not be what closes it.
@@ -184,10 +188,9 @@ describe("AIService", () => {
       expect(service.handled).toHaveLength(0);
 
       gated.gate.resolve(connection);
-      await until(() => service.handled.length === 3);
+      await until(() => service.handled.length === 2);
 
       expect(service.handled.map((frame) => frame.kind)).toEqual([
-        "start",
         "inputAudio",
         "inputAudio",
       ]);
@@ -210,7 +213,7 @@ describe("AIService", () => {
       // frame arriving during it must not be handled ahead of the backlog.
       gated.gate.resolve(connection);
       pipeline.push(createFrame({ kind: "inputAudio", data: Int16Array.from([2]) }));
-      await until(() => service.handled.length === 3);
+      await until(() => service.handled.length === 2);
 
       const audio = service.handled.filter((frame) => frame.kind === "inputAudio");
       expect((audio[0] as { data: Int16Array }).data).toEqual(Int16Array.from([1]));
@@ -283,6 +286,17 @@ describe("AIService", () => {
       const running = pipeline.start(RATES);
 
       pipeline.push(createFrame({ kind: "inputAudio", data: Int16Array.from([1]) }));
+
+      await expect(running).rejects.toThrow("no connection");
+    });
+
+    test("stops the pipeline even when no frame follows the failed handshake", async () => {
+      // The frame that starts the handshake is consumed, so nothing is left in
+      // the queue once it fails. The service has to wake the loop itself, or
+      // the pipeline would wait forever on an empty queue.
+      const service = new TestService(() => Promise.reject(new Error("no connection")));
+      const pipeline = new Pipeline([service]);
+      const running = pipeline.start(RATES);
 
       await expect(running).rejects.toThrow("no connection");
     });

@@ -14,6 +14,7 @@ export * from "./core/pipeline.ts";
 export * from "./core/queue.ts";
 export * from "./frames/index.ts";
 export * from "./services/base.ts";
+export * from "./services/deepgram-stt.ts";
 export * from "./transports/serve.ts";
 export * from "./transports/socket.ts";
 export * from "./transports/websocket-input.ts";

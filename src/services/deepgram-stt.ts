@@ -24,6 +24,11 @@ export interface DeepgramOptions {
   readonly model?: string;
   /** The language of the audio. Defaults to `en`. */
   readonly language?: string;
+  /**
+   * How long a pause ends an utterance, in milliseconds. Defaults to
+   * `DEFAULT_ENDPOINTING`.
+   */
+  readonly endpointing?: number;
   /** The endpoint to connect to, for pointing at a proxy or a test double. */
   readonly url?: string;
 }
@@ -31,10 +36,21 @@ export interface DeepgramOptions {
 /** The default endpoint, which tests override. */
 export const DEEPGRAM_URL = "wss://api.deepgram.com/v1/listen";
 
+/**
+ * How long a pause Deepgram waits for before ending an utterance.
+ *
+ * The service default is 10ms, which is built for push-to-talk rather than
+ * conversation: a speaker who pauses to think mid-sentence is cut off, and the
+ * model answers half a question. Half a second is long enough to survive a
+ * breath and short enough that a reply does not feel late.
+ */
+export const DEFAULT_ENDPOINTING = 500;
+
 /** A result message, as far as this service reads it. */
 interface DeepgramResult {
   readonly type?: unknown;
   readonly is_final?: unknown;
+  readonly speech_final?: unknown;
   readonly channel?: {
     readonly alternatives?: readonly { readonly transcript?: unknown }[];
   };
@@ -48,13 +64,19 @@ interface DeepgramResult {
  * checked rather than trusted: the payload comes from the network, and a
  * malformed one should be ignored rather than crash the pipeline.
  *
+ * Two flags come back, and they mean different things. `is_final` says this
+ * segment of transcript will not change; `speech_final` says the speaker has
+ * paused, so the utterance is over. A long utterance is reported as several
+ * final segments before the pause arrives, which is why the end of the
+ * utterance cannot be read from `is_final` alone.
+ *
  * @param message The parsed message.
- * @returns The transcript and whether it is final, or `undefined` if the
- *   message carries no text.
+ * @returns The transcript, whether it is final, and whether the utterance has
+ *   ended, or `undefined` if the message carries no text.
  */
 export function readTranscript(
   message: unknown,
-): { readonly text: string; readonly final: boolean } | undefined {
+): { readonly text: string; readonly final: boolean; readonly ended: boolean } | undefined {
   if (typeof message !== "object" || message === null) {
     return undefined;
   }
@@ -65,13 +87,22 @@ export function readTranscript(
   }
 
   const transcript = result.channel?.alternatives?.[0]?.transcript;
-  if (typeof transcript !== "string" || transcript.length === 0) {
+  const text = typeof transcript === "string" ? transcript : "";
+  const ended = result.speech_final === true;
+
+  if (text.length === 0 && !ended) {
     // An interim result with nothing recognised yet is sent as an empty
     // string, which is not something downstream can use.
+    //
+    // A boundary with no text is different, and is not discarded: the result
+    // that reports the pause often carries nothing new, since everything the
+    // speaker said was already finalised a segment earlier. Dropping it would
+    // lose the end of the turn and leave the pipeline waiting for a reply that
+    // was never asked for.
     return undefined;
   }
 
-  return { text: transcript, final: result.is_final === true };
+  return { text, final: result.is_final === true, ended };
 }
 
 /** Build the connection URL for a session. */
@@ -90,6 +121,10 @@ export function deepgramUrl(
   // Without this, nothing is reported until the whole utterance is done, so a
   // reply could not start until the user had stopped talking.
   url.searchParams.set("interim_results", "true");
+  // How long a pause ends an utterance. Deepgram's own default is 10ms, which
+  // is short enough to cut a speaker off mid-thought; the reason for raising it
+  // is in `DEFAULT_ENDPOINTING`.
+  url.searchParams.set("endpointing", String(options.endpointing ?? DEFAULT_ENDPOINTING));
   return url.toString();
 }
 
@@ -172,7 +207,7 @@ export class DeepgramSTT extends AIService {
     this.push(frame);
   }
 
-  /** Turn one message from Deepgram into a transcript frame. */
+  /** Turn one message from Deepgram into transcript and speaking-state frames. */
   #onMessage(data: unknown): void {
     let parsed: unknown;
     try {
@@ -187,6 +222,24 @@ export class DeepgramSTT extends AIService {
       return;
     }
 
-    this.push(createFrame({ kind: "transcript", text: result.text, final: result.final }));
+    // The transcript goes out before the state that describes it. Both are
+    // data, so they keep arrival order, and a stop that overtook the text it
+    // ends would flush an empty utterance before the words arrived.
+    //
+    // A result can report the pause with no text of its own, when everything
+    // the speaker said was finalised a segment earlier. That is not a
+    // transcript and nothing downstream wants it, but the boundary it carries
+    // is the whole reason it is read.
+    if (result.text.length > 0) {
+      this.push(createFrame({ kind: "transcript", text: result.text, final: result.final }));
+    }
+
+    if (result.ended) {
+      // Deepgram's endpointing is the only source of a turn boundary until
+      // voice activity detection arrives: the aggregator waits for this frame
+      // to know the user has stopped, and without it no reply is ever asked
+      // for.
+      this.push(createFrame({ kind: "userStoppedSpeaking" }));
+    }
   }
 }

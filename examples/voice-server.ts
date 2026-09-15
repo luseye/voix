@@ -18,8 +18,9 @@
  *   bun run examples/voice-server.ts
  * ```
  *
- * Then connect a client that streams microphone audio and plays what comes
- * back. The console prints what the pipeline is doing.
+ * Then open `http://localhost:8080` and press the button: the page serves the
+ * browser client, which streams microphone audio and plays what comes back.
+ * The console prints what the pipeline is doing.
  */
 
 import { UserAggregator, AssistantAggregator } from "../src/core/aggregators.ts";
@@ -34,6 +35,7 @@ import { OpenAILLM, type OpenAIOptions } from "../src/services/openai-llm.ts";
 import { serve } from "../src/transports/serve.ts";
 import { WebSocketServer } from "../src/transports/websocket-server.ts";
 import { type WebSocketTransport } from "../src/transports/websocket-transport.ts";
+import page from "./voice-client.html";
 
 /** How the pipeline's providers are configured. */
 export interface VoicePipelineOptions {
@@ -145,6 +147,9 @@ if (import.meta.main) {
     });
   });
 
-  serve(server, { port: PORT, path: "/voice" });
-  console.log(`listening on ws://localhost:${PORT}/voice`);
+  // The page is served at the root and the session at `/voice`, so opening
+  // `http://localhost:PORT` in a browser is the whole client. A microphone
+  // needs a secure context, which `http://localhost` counts as.
+  serve(server, { port: PORT, path: "/voice", page });
+  console.log(`open http://localhost:${PORT} and press the button`);
 }

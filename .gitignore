@@ -24,3 +24,6 @@ coverage/
 .idea/
 .vscode/
 *.swp
+
+# Research scratch
+.firecrawl/

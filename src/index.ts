@@ -14,6 +14,7 @@ export * from "./core/context.ts";
 export * from "./core/frame-processor.ts";
 export * from "./core/pipeline.ts";
 export * from "./core/queue.ts";
+export * from "./core/sentence-aggregator.ts";
 export * from "./frames/index.ts";
 export * from "./services/base.ts";
 export * from "./services/deepgram-stt.ts";

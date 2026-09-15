@@ -10,6 +10,7 @@ import {
   readDelta,
   readSse,
 } from "../src/services/openai-llm.ts";
+import { FakeOpenAI, chunk, event, until } from "./fakes.ts";
 
 const RATES = { sampleRateIn: 16000, sampleRateOut: 24000 };
 
@@ -32,25 +33,6 @@ class Spy extends FrameProcessor {
       .map((frame) => (frame as { text: string }).text)
       .join("");
   }
-}
-
-/** Waits until a condition holds, so tests do not depend on timing. */
-async function until(predicate: () => boolean): Promise<void> {
-  for (let i = 0; i < 200; i++) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 1));
-  }
-  throw new Error("condition was never met");
-}
-
-/** Build one server-sent event carrying `payload`. */
-function event(payload: unknown): string {
-  return `data: ${typeof payload === "string" ? payload : JSON.stringify(payload)}\n\n`;
-}
-
-/** A stream chunk carrying a fragment of the reply. */
-function chunk(content: string): unknown {
-  return { choices: [{ delta: { content } }] };
 }
 
 /** Collect an async generator into an array. */
@@ -154,86 +136,6 @@ describe("readSse", () => {
     expect(await collect(readSse(streamOf('data: {"a":1}')))).toEqual([]);
   });
 });
-
-/** A fake OpenAI, so the wire protocol is exercised without an API key. */
-class FakeOpenAI {
-  readonly #server: Bun.Server<undefined>;
-  /** The authorization header each request presented. */
-  readonly authHeaders: (string | null)[] = [];
-  /** The parsed body of each request. */
-  readonly bodies: Record<string, unknown>[] = [];
-  /** Events to send, in order, once a request arrives. */
-  #events: string[] = [];
-  /** Whether the reply should be held open instead of ending. */
-  #hold = false;
-  #held: (() => void) | undefined;
-  /** A status to fail with instead of streaming, when set. */
-  #status = 200;
-
-  constructor() {
-    this.#server = Bun.serve({
-      port: 0,
-      fetch: async (request) => {
-        this.authHeaders.push(request.headers.get("authorization"));
-        this.bodies.push((await request.json()) as Record<string, unknown>);
-
-        if (this.#status !== 200) {
-          return new Response("nope", { status: this.#status });
-        }
-
-        const events = this.#events;
-        const held = this.#hold;
-        const stream = new ReadableStream<Uint8Array>({
-          start: (controller) => {
-            const encoder = new TextEncoder();
-            for (const event of events) {
-              controller.enqueue(encoder.encode(event));
-            }
-            if (held) {
-              // Keep the reply open so a test can interrupt mid-stream.
-              this.#held = () => controller.close();
-              return;
-            }
-            controller.close();
-          },
-        });
-
-        return new Response(stream, {
-          headers: { "Content-Type": "text/event-stream" },
-        });
-      },
-    });
-  }
-
-  get url(): string {
-    return `http://localhost:${this.#server.port}/v1/chat/completions`;
-  }
-
-  /** Reply with the given fragments, then end the stream. */
-  reply(...fragments: string[]): void {
-    this.#events = [...fragments.map((text) => event(chunk(text))), event("[DONE]")];
-  }
-
-  /** Reply with the given fragments and keep the stream open. */
-  replyAndHold(...fragments: string[]): void {
-    this.#events = fragments.map((text) => event(chunk(text)));
-    this.#hold = true;
-  }
-
-  /** Release a stream held open by `replyAndHold`. */
-  release(): void {
-    this.#held?.();
-  }
-
-  /** Fail every request with the given status. */
-  fail(status: number): void {
-    this.#status = status;
-  }
-
-  stop(): void {
-    this.#server.stop(true);
-  }
-}
 
 describe("OpenAILLM", () => {
   const servers: FakeOpenAI[] = [];

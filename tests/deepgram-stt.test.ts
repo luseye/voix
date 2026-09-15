@@ -10,6 +10,7 @@ import {
   deepgramUrl,
   readTranscript,
 } from "../src/services/deepgram-stt.ts";
+import { FakeDeepgram, until } from "./fakes.ts";
 
 const RATES = { sampleRateIn: 16000, sampleRateOut: 24000 };
 
@@ -37,15 +38,6 @@ class Spy extends FrameProcessor {
       .map((frame) => frame.kind)
       .filter((kind) => kind === "userStartedSpeaking" || kind === "userStoppedSpeaking");
   }
-}
-
-/** Waits until a condition holds, so tests do not depend on timing. */
-async function until(predicate: () => boolean): Promise<void> {
-  for (let i = 0; i < 400; i++) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  throw new Error("condition was never met");
 }
 
 describe("readTranscript", () => {
@@ -175,66 +167,6 @@ describe("deepgramUrl", () => {
     expect(DEEPGRAM_URL).toBe("wss://api.deepgram.com/v1/listen");
   });
 });
-
-/** A fake Deepgram, so the wire protocol is exercised without an API key. */
-class FakeDeepgram {
-  readonly #server: Bun.Server<undefined>;
-  /** The authorization header each connection presented. */
-  readonly authHeaders: (string | null)[] = [];
-  /** The query each connection used. */
-  readonly queries: URLSearchParams[] = [];
-  /** Binary payloads received, and control messages. */
-  readonly audio: Uint8Array[] = [];
-  readonly control: string[] = [];
-  #socket: Bun.ServerWebSocket<undefined> | undefined;
-
-  constructor() {
-    this.#server = Bun.serve({
-      port: 0,
-      fetch: (request, server) => {
-        const url = new URL(request.url);
-        this.authHeaders.push(request.headers.get("authorization"));
-        this.queries.push(url.searchParams);
-        if (server.upgrade(request)) {
-          return undefined;
-        }
-        return new Response("expected a WebSocket", { status: 426 });
-      },
-      websocket: {
-        open: (socket) => {
-          this.#socket = socket;
-        },
-        message: (_socket, message) => {
-          if (typeof message === "string") {
-            this.control.push(message);
-          } else {
-            // Bun hands binary messages over as a Buffer, which is already a
-            // Uint8Array.
-            this.audio.push(new Uint8Array(message));
-          }
-        },
-      },
-    });
-  }
-
-  get url(): string {
-    return `ws://localhost:${this.#server.port}/v1/listen`;
-  }
-
-  /** Send a message to the connected client, as Deepgram would. */
-  send(message: unknown): void {
-    this.#socket?.send(JSON.stringify(message));
-  }
-
-  /** Send raw bytes, for the case where the payload is not JSON at all. */
-  sendRaw(payload: string): void {
-    this.#socket?.send(payload);
-  }
-
-  stop(): void {
-    this.#server.stop(true);
-  }
-}
 
 describe("DeepgramSTT", () => {
   const servers: FakeDeepgram[] = [];

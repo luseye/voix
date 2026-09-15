@@ -2,7 +2,6 @@ import { afterAll, describe, expect, test } from "bun:test";
 
 import { FrameProcessor } from "../src/core/frame-processor.ts";
 import { Pipeline } from "../src/core/pipeline.ts";
-import { writeSamples } from "../src/audio/pcm.ts";
 import { createFrame, type Frame } from "../src/frames/index.ts";
 import {
   CARTESIA_URL,
@@ -13,6 +12,7 @@ import {
   readContextId,
   readError,
 } from "../src/services/cartesia-tts.ts";
+import { FakeCartesia, encode, until } from "./fakes.ts";
 
 const RATES = { sampleRateIn: 16000, sampleRateOut: 24000 };
 
@@ -35,15 +35,6 @@ class Spy extends FrameProcessor {
       .filter((frame) => frame.kind === "ttsAudio")
       .map((frame) => (frame as { data: Int16Array }).data);
   }
-}
-
-/** Waits until a condition holds, so tests do not depend on timing. */
-async function until(predicate: () => boolean): Promise<void> {
-  for (let i = 0; i < 400; i++) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  throw new Error("condition was never met");
 }
 
 /**
@@ -76,11 +67,6 @@ async function rejection(promise: Promise<unknown>, ms = 5000): Promise<unknown>
   } finally {
     clearTimeout(timer);
   }
-}
-
-/** Base64 of little-endian 16-bit samples, as Cartesia sends them. */
-function encode(samples: number[]): string {
-  return Buffer.from(writeSamples(Int16Array.from(samples))).toString("base64");
 }
 
 describe("cartesiaUrl", () => {
@@ -166,84 +152,6 @@ describe("readError", () => {
     expect(readError(null)).toBeUndefined();
   });
 });
-
-/** A fake Cartesia, so the wire protocol is exercised without an API key. */
-class FakeCartesia {
-  readonly #server: Bun.Server<undefined>;
-  /** The API key header each connection presented. */
-  readonly apiKeys: (string | null)[] = [];
-  /** The version each connection requested. */
-  readonly versions: (string | null)[] = [];
-  /** Generation requests received, parsed. */
-  readonly requests: Record<string, unknown>[] = [];
-  /** Cancellation requests received, parsed. */
-  readonly cancels: Record<string, unknown>[] = [];
-  #socket: Bun.ServerWebSocket<undefined> | undefined;
-
-  constructor() {
-    this.#server = Bun.serve({
-      port: 0,
-      fetch: (request, server) => {
-        const url = new URL(request.url);
-        this.apiKeys.push(request.headers.get("x-api-key"));
-        this.versions.push(url.searchParams.get("cartesia_version"));
-        if (server.upgrade(request)) {
-          return undefined;
-        }
-        return new Response("expected a WebSocket", { status: 426 });
-      },
-      websocket: {
-        open: (socket) => {
-          this.#socket = socket;
-        },
-        message: (_socket, message) => {
-          if (typeof message !== "string") {
-            return;
-          }
-          const parsed = JSON.parse(message) as Record<string, unknown>;
-          if (parsed.cancel === true) {
-            this.cancels.push(parsed);
-          } else {
-            this.requests.push(parsed);
-          }
-        },
-      },
-    });
-  }
-
-  get url(): string {
-    return `ws://localhost:${this.#server.port}/tts/websocket`;
-  }
-
-  /** The context id of the most recent generation request. */
-  get lastContextId(): string {
-    return this.requests[this.requests.length - 1]!.context_id as string;
-  }
-
-  /** Send an audio chunk for a context, as Cartesia would. */
-  chunk(contextId: string, samples: number[]): void {
-    this.#socket?.send(JSON.stringify({ type: "chunk", data: encode(samples), context_id: contextId }));
-  }
-
-  /** Send the completion signal for a context. */
-  done(contextId: string): void {
-    this.#socket?.send(JSON.stringify({ type: "done", done: true, context_id: contextId }));
-  }
-
-  /** Send an error for a context, or globally when none is given. */
-  error(message: unknown): void {
-    this.#socket?.send(JSON.stringify(message));
-  }
-
-  /** Send a payload that is not JSON at all. */
-  sendRaw(payload: string): void {
-    this.#socket?.send(payload);
-  }
-
-  stop(): void {
-    this.#server.stop(true);
-  }
-}
 
 describe("CartesiaTTS", () => {
   const servers: FakeCartesia[] = [];

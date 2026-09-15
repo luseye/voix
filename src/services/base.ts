@@ -22,7 +22,7 @@
  */
 
 import { FrameProcessor } from "../core/frame-processor.ts";
-import { type Frame } from "../frames/index.ts";
+import { createFrame, type Frame } from "../frames/index.ts";
 
 /** The start frame, which carries the rates a connection is built from. */
 export type StartFrame = Extract<Frame, { kind: "start" }>;
@@ -53,11 +53,19 @@ export abstract class AIService extends FrameProcessor {
   #failure: unknown;
 
   protected override async process(frame: Frame): Promise<void> {
+    if (this.#failure !== undefined) {
+      // Checked before anything else, so a failure surfaces on the next frame
+      // whatever kind it is — including the cancel frame that `#open` queues
+      // to make sure one arrives.
+      throw this.#failure;
+    }
+
     if (frame.kind === "start") {
-      // The connection opens alongside the loop rather than inside it, and the
-      // start frame goes into the backlog so it is handled in arrival order
-      // like everything else.
-      this.#pending.push(frame);
+      // The start frame is forwarded at once rather than held until the
+      // connection opens: a later stage opens its own connection from it, and
+      // making that wait for this handshake would serialise every stage's
+      // startup. It is not handed to `handle` either, since `connect` already
+      // received it and forwarding it again would duplicate it downstream.
       this.createSessionTask((signal) => this.#open(frame, signal));
       this.push(frame);
       return;
@@ -69,13 +77,6 @@ export abstract class AIService extends FrameProcessor {
       this.#pending = [];
       this.push(frame);
       return;
-    }
-
-    if (this.#failure !== undefined) {
-      // The connection could not be made, so this frame has nothing to reach.
-      // Throwing stops the pipeline, which is the honest outcome: a stage that
-      // silently does nothing is worse than one that stops.
-      throw this.#failure;
     }
 
     const connection = this.#connection;
@@ -99,13 +100,30 @@ export abstract class AIService extends FrameProcessor {
       // on purpose, and recording it would report a broken service for a
       // session that ended normally.
       //
-      // This guard is defensive rather than exercised: shutdown pushes an end
-      // frame, which is scheduled ahead of data frames, so once shutdown has
-      // begun no frame reaches the failure check below. It is kept because the
-      // cost of being wrong is a spurious pipeline failure, and because it
-      // states the intent at the point where the distinction is made.
+      // The branch is reached whenever a handshake is still in flight when the
+      // session ends, but it is not load-bearing today: shutdown closes the
+      // queue before aborting this signal, so the wake below finds a closed
+      // queue and the failure is discarded either way. It is kept because the
+      // distinction is real and the cost of losing it is a spurious failure if
+      // that ordering ever changes.
       if (!signal.aborted) {
         this.#failure = error;
+
+        // Wake the loop so it observes the failure. Without this it would stay
+        // blocked on an empty queue: the frame that triggered the handshake was
+        // already consumed, and clearing the backlog leaves nothing to process.
+        // The loop's next `process` call throws the failure and stops the
+        // pipeline, which is the honest outcome — a stage that silently does
+        // nothing is worse than one that stops.
+        //
+        // Guarded because the loop may have stopped while the handshake was
+        // still running, in which case there is nothing left to fail.
+        try {
+          this.enqueue(createFrame({ kind: "cancel" }));
+        } catch {
+          // The queue is already closed, so the pipeline has stopped and the
+          // failure no longer has anywhere to go.
+        }
       }
       this.#pending = [];
       return;

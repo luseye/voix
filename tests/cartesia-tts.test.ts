@@ -8,6 +8,7 @@ import {
   CARTESIA_VERSION,
   CartesiaTTS,
   cartesiaUrl,
+  DEFAULT_VOICE,
   readChunkData,
   readContextId,
   readError,
@@ -228,6 +229,24 @@ describe("CartesiaTTS", () => {
     expect(cartesia.requests[0]!.model_id).toBe("sonic-3.6");
     expect(cartesia.requests[0]!.language).toBe("zh");
     expect(cartesia.requests[0]!.transcript).toBe("你好。");
+
+    await pipeline.stop();
+    await running;
+  });
+
+  test("speaks with a default voice when none is given", async () => {
+    // A voice is an id, not a secret. Requiring one would make the service
+    // unusable until the caller had been to the console, for no reason.
+    const cartesia = fakeCartesia();
+    const tts = new CartesiaTTS({ apiKey: "k", url: cartesia.url });
+    const pipeline = new Pipeline([tts]);
+    const running = pipeline.start(RATES);
+    await until(() => cartesia.apiKeys.length === 1);
+
+    pipeline.push(createFrame({ kind: "ttsText", text: "Hello." }));
+    await until(() => cartesia.requests.length === 1);
+
+    expect(cartesia.requests[0]!.voice).toBe(DEFAULT_VOICE);
 
     await pipeline.stop();
     await running;

@@ -22,8 +22,14 @@ import { createFrame, type Frame } from "../frames/index.ts";
 export interface CartesiaOptions {
   /** The API key. Sent in a header, never in the URL. */
   readonly apiKey: string;
-  /** The voice to speak with. */
-  readonly voice: string;
+  /**
+   * The voice to speak with. Defaults to `DEFAULT_VOICE`.
+   *
+   * A voice is an id from Cartesia's voice library, not a secret, so it is
+   * optional: a caller who has not picked one still gets speech rather than an
+   * error about a missing setting.
+   */
+  readonly voice?: string;
   /** The model to generate with. Defaults to `sonic-latest`. */
   readonly model?: string;
   /** The language to speak. Defaults to `en`. */
@@ -34,6 +40,16 @@ export interface CartesiaOptions {
 
 /** The default endpoint, which tests override. */
 export const CARTESIA_URL = "wss://api.cartesia.ai/tts/websocket";
+
+/**
+ * The voice used when none is given.
+ *
+ * A voice from Cartesia's public library — "Barbershop Man" — and the one their
+ * own documentation uses in every example. It is a default rather than a
+ * requirement so that the framework speaks out of the box; a caller who wants a
+ * particular voice passes its id, which can be listed in the Cartesia console.
+ */
+export const DEFAULT_VOICE = "a0e99841-438c-4a64-b679-ae501e7d6091";
 
 /**
  * The API version to request.
@@ -217,7 +233,7 @@ export class CartesiaTTS extends AIService {
         JSON.stringify({
           model_id: this.#options.model ?? "sonic-latest",
           transcript: frame.text,
-          voice: this.#options.voice,
+          voice: this.#options.voice ?? DEFAULT_VOICE,
           language: this.#options.language ?? "en",
           context_id: contextId,
           output_format: {

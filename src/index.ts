@@ -17,6 +17,7 @@ export * from "./core/queue.ts";
 export * from "./core/sentence-aggregator.ts";
 export * from "./frames/index.ts";
 export * from "./services/base.ts";
+export * from "./services/cartesia-tts.ts";
 export * from "./services/deepgram-stt.ts";
 export * from "./services/openai-llm.ts";
 export * from "./transports/serve.ts";

@@ -27,7 +27,7 @@ class FakeConnection implements ServiceConnection {
 
 /** A service that records the frames it handles once connected. */
 class TestService extends AIService {
-  readonly connection = new FakeConnection();
+  readonly fake = new FakeConnection();
   readonly handled: Frame[] = [];
   /** The start frame the connection was built from, for asserting on rates. */
   started: StartFrame | undefined;
@@ -40,7 +40,7 @@ class TestService extends AIService {
     delay = 0,
   ) {
     super("service");
-    this.#connect = connect ?? (async () => this.connection);
+    this.#connect = connect ?? (async () => this.fake);
     this.#delay = delay;
   }
 
@@ -150,7 +150,7 @@ describe("AIService", () => {
       await pipeline.stop();
       await running;
 
-      expect(service.connection.closed).toBe(true);
+      expect(service.fake.closed).toBe(true);
     });
 
     test("keeps the connection open across an interruption", async () => {
@@ -164,11 +164,11 @@ describe("AIService", () => {
       pipeline.interrupt();
       await new Promise((resolve) => setTimeout(resolve, 5));
 
-      expect(service.connection.closed).toBe(false);
+      expect(service.fake.closed).toBe(false);
 
       await pipeline.stop();
       await running;
-      expect(service.connection.closed).toBe(true);
+      expect(service.fake.closed).toBe(true);
     });
   });
 

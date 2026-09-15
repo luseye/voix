@@ -4,6 +4,7 @@ import { FrameProcessor } from "../src/core/frame-processor.ts";
 import { Pipeline } from "../src/core/pipeline.ts";
 import { createFrame, type Frame } from "../src/frames/index.ts";
 import {
+  DEFAULT_ENDPOINTING,
   DEEPGRAM_URL,
   DeepgramSTT,
   deepgramUrl,
@@ -29,6 +30,13 @@ class Spy extends FrameProcessor {
         return `${text}:${final}`;
       });
   }
+
+  /** The speaking-state frames seen, in order. */
+  get states(): string[] {
+    return this.seen
+      .map((frame) => frame.kind)
+      .filter((kind) => kind === "userStartedSpeaking" || kind === "userStoppedSpeaking");
+  }
 }
 
 /** Waits until a condition holds, so tests do not depend on timing. */
@@ -45,10 +53,11 @@ describe("readTranscript", () => {
     const message = {
       type: "Results",
       is_final: true,
+      speech_final: true,
       channel: { alternatives: [{ transcript: "hello there" }] },
     };
 
-    expect(readTranscript(message)).toEqual({ text: "hello there", final: true });
+    expect(readTranscript(message)).toEqual({ text: "hello there", final: true, ended: true });
   });
 
   test("reads an interim result", () => {
@@ -58,14 +67,28 @@ describe("readTranscript", () => {
       channel: { alternatives: [{ transcript: "hel" }] },
     };
 
-    expect(readTranscript(message)).toEqual({ text: "hel", final: false });
+    expect(readTranscript(message)).toEqual({ text: "hel", final: false, ended: false });
+  });
+
+  test("separates the end of a segment from the end of the utterance", () => {
+    // A long utterance is reported as several final segments, and only the
+    // last one says the speaker paused. Reading the turn boundary from
+    // `is_final` would ask the model to reply to half a sentence.
+    const message = {
+      type: "Results",
+      is_final: true,
+      speech_final: false,
+      channel: { alternatives: [{ transcript: "and then" }] },
+    };
+
+    expect(readTranscript(message)).toEqual({ text: "and then", final: true, ended: false });
   });
 
   test("treats a missing is_final as interim", () => {
     // Only an explicit true is final; anything else is still in progress.
     const message = { type: "Results", channel: { alternatives: [{ transcript: "hi" }] } };
 
-    expect(readTranscript(message)).toEqual({ text: "hi", final: false });
+    expect(readTranscript(message)).toEqual({ text: "hi", final: false, ended: false });
   });
 
   test("ignores a result with an empty transcript", () => {
@@ -115,6 +138,19 @@ describe("deepgramUrl", () => {
 
     expect(url.searchParams.get("model")).toBe("nova-3");
     expect(url.searchParams.get("language")).toBe("en");
+  });
+
+  test("waits for a conversational pause before ending an utterance", () => {
+    // Deepgram's own default is 10ms, which cuts a speaker off mid-thought.
+    const url = new URL(deepgramUrl({ apiKey: "k" }, 16000));
+
+    expect(url.searchParams.get("endpointing")).toBe(String(DEFAULT_ENDPOINTING));
+  });
+
+  test("lets the pause threshold be overridden", () => {
+    const url = new URL(deepgramUrl({ apiKey: "k", endpointing: 300 }, 16000));
+
+    expect(url.searchParams.get("endpointing")).toBe("300");
   });
 
   test("lets the model and language be overridden", () => {
@@ -268,6 +304,91 @@ describe("DeepgramSTT", () => {
     await until(() => spy.transcripts.length === 2);
 
     expect(spy.transcripts).toEqual(["hel:false", "hello:true"]);
+
+    await pipeline.stop();
+    await running;
+  });
+
+  test("reports the end of an utterance once the speaker pauses", async () => {
+    const deepgram = fakeDeepgram();
+    const stt = new DeepgramSTT({ apiKey: "k", url: deepgram.url });
+    const spy = new Spy("spy");
+    const pipeline = new Pipeline([stt, spy]);
+    const running = pipeline.start(RATES);
+    await until(() => deepgram.authHeaders.length === 1);
+
+    deepgram.send({
+      type: "Results",
+      is_final: true,
+      speech_final: false,
+      channel: { alternatives: [{ transcript: "and then" }] },
+    });
+    deepgram.send({
+      type: "Results",
+      is_final: true,
+      speech_final: true,
+      channel: { alternatives: [{ transcript: "we left." }] },
+    });
+    await until(() => spy.states.length === 1);
+
+    // One boundary for the whole utterance, not one per final segment: the
+    // pause is what ends the turn, and only the last result reports it.
+    expect(spy.states).toEqual(["userStoppedSpeaking"]);
+
+    await pipeline.stop();
+    await running;
+  });
+
+  test("puts the transcript before the state that ends it", async () => {
+    // Both are data and keep arrival order, so the aggregator reads the words
+    // before it flushes the utterance. Reversed, it would record nothing.
+    const deepgram = fakeDeepgram();
+    const stt = new DeepgramSTT({ apiKey: "k", url: deepgram.url });
+    const spy = new Spy("spy");
+    const pipeline = new Pipeline([stt, spy]);
+    const running = pipeline.start(RATES);
+    await until(() => deepgram.authHeaders.length === 1);
+
+    deepgram.send({
+      type: "Results",
+      is_final: true,
+      speech_final: true,
+      channel: { alternatives: [{ transcript: "hello" }] },
+    });
+    await until(() => spy.seen.length >= 2);
+
+    const kinds = spy.seen.map((frame) => frame.kind);
+    expect(kinds.indexOf("transcript")).toBeLessThan(kinds.indexOf("userStoppedSpeaking"));
+
+    await pipeline.stop();
+    await running;
+  });
+
+  test("reports a boundary that carries no text of its own", async () => {
+    // The result that reports the pause usually carries no transcript: the
+    // words were finalised a segment earlier, and the boundary arrives as an
+    // interim with an empty string. Discarding it because it has no text would
+    // lose every turn boundary, so the boundary is kept and no transcript
+    // frame is produced for it.
+    const deepgram = fakeDeepgram();
+    const stt = new DeepgramSTT({ apiKey: "k", url: deepgram.url });
+    const spy = new Spy("spy");
+    const pipeline = new Pipeline([stt, spy]);
+    const running = pipeline.start(RATES);
+    await until(() => deepgram.authHeaders.length === 1);
+
+    deepgram.send({
+      type: "Results",
+      is_final: false,
+      speech_final: true,
+      channel: { alternatives: [{ transcript: "" }] },
+    });
+    await until(() => spy.states.length === 1);
+
+    expect(spy.states).toEqual(["userStoppedSpeaking"]);
+    // Nothing was said in this result, so nothing is recorded for it. Whether
+    // the turn is worth answering is the aggregator's decision, not this one's.
+    expect(spy.transcripts).toEqual([]);
 
     await pipeline.stop();
     await running;

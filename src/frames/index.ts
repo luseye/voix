@@ -55,7 +55,9 @@ export type SpeechFrame =
   | { kind: "botStoppedSpeaking" };
 
 /** Instructions addressed to the language model. */
-export type LLMControlFrame = { kind: "llmRun" };
+export type LLMControlFrame =
+  | { kind: "llmRun" }
+  | { kind: "llmTextEnded" };
 
 /** The body of any frame, before it is given an id. */
 export type FrameBody =
@@ -95,8 +97,13 @@ export function createFrame<T extends FrameBody>(body: T): T & { readonly id: nu
  * How a frame is scheduled relative to other frames.
  *
  * - `start` — the pipeline's opening frame, processed before everything else.
- * - `system` — lifecycle, control, and speaking state, processed before data.
- * - `default` — data frames, processed in arrival order.
+ * - `system` — lifecycle and control, processed before data.
+ * - `default` — everything else, in arrival order.
+ *
+ * Only lifecycle and control jump the queue. Everything a conversation is made
+ * of — audio, text, and the speaking state that describes it — is data, and
+ * data keeps its arrival order: a frame that overtakes the frames it follows
+ * reverses the conversation.
  */
 export type FrameTier = "start" | "system" | "default";
 
@@ -120,10 +127,19 @@ const FRAME_SPECS = {
   cancel: { tier: "system", interruptible: false },
   interrupt: { tier: "system", interruptible: false },
 
-  userStartedSpeaking: { tier: "system", interruptible: false },
-  userStoppedSpeaking: { tier: "system", interruptible: false },
-  botStartedSpeaking: { tier: "system", interruptible: false },
-  botStoppedSpeaking: { tier: "system", interruptible: false },
+  // Speaking state is conversational data, not pipeline control, so it is
+  // scheduled with the data it describes rather than ahead of it. At system
+  // tier `userStoppedSpeaking` overtook the `transcript` queued before it — the
+  // very words it marks the end of — and the aggregator flushed an empty
+  // utterance before the text arrived. Arrival order is the conversation's
+  // order.
+  //
+  // Still not interruptible: that the user stopped speaking stays true even
+  // when an interruption drops the frames around it.
+  userStartedSpeaking: { tier: "default", interruptible: false },
+  userStoppedSpeaking: { tier: "default", interruptible: false },
+  botStartedSpeaking: { tier: "default", interruptible: false },
+  botStoppedSpeaking: { tier: "default", interruptible: false },
 
   inputAudio: { tier: "default", interruptible: true },
   ttsAudio: { tier: "default", interruptible: true },
@@ -132,6 +148,16 @@ const FRAME_SPECS = {
   ttsText: { tier: "default", interruptible: true },
 
   llmRun: { tier: "default", interruptible: true },
+
+  // Default tier, not system, even though it marks the end of a stream: at
+  // system tier it would be dequeued ahead of the `llmText` chunks still
+  // queued behind it, and the aggregator would finish the reply before it had
+  // read the rest of it. Same tier keeps arrival order.
+  //
+  // Not interruptible, unlike the chunks it follows: an interruption drops the
+  // remaining text, but the part already spoken is still part of the
+  // conversation, and this frame is what tells the aggregator to record it.
+  llmTextEnded: { tier: "default", interruptible: false },
 } satisfies Record<FrameKind, FrameSpec>;
 
 /** Queue priority per tier. Lower values are dequeued first. */

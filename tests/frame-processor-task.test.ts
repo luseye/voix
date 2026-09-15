@@ -110,8 +110,11 @@ describe("FrameProcessor", () => {
 
       // A turn's state frames outlive the turn: the pipeline still has to know
       // that the user is speaking, and still has to be stoppable.
+      //
+      // The end frame leads because lifecycle control is scheduled ahead of
+      // data, while speaking state is data and keeps its arrival order.
       await sink.run();
-      expect(sink.seen.map((frame) => frame.kind)).toEqual(["userStartedSpeaking", "end"]);
+      expect(sink.seen.map((frame) => frame.kind)).toEqual(["end", "userStartedSpeaking"]);
     });
 
     test("leaves the frame being handled alone", async () => {

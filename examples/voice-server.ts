@@ -14,9 +14,12 @@
  * Run it with the keys in the environment:
  *
  * ```bash
- * DEEPGRAM_API_KEY=... OPENAI_API_KEY=... CARTESIA_API_KEY=... CARTESIA_VOICE=... \
+ * DEEPGRAM_API_KEY=... OPENAI_API_KEY=... CARTESIA_API_KEY=... \
  *   bun run examples/voice-server.ts
  * ```
+ *
+ * Set `CARTESIA_VOICE` to speak with a particular voice; without it the service
+ * uses its own default.
  *
  * Then open `http://localhost:8080` and press the button: the page serves the
  * browser client, which streams microphone audio and plays what comes back.
@@ -127,6 +130,12 @@ function requireEnv(name: string): string {
   return value;
 }
 
+/** Read an optional setting, treating an empty value as unset. */
+function optionalEnv(name: string): string | undefined {
+  const value = process.env[name];
+  return value === undefined || value.length === 0 ? undefined : value;
+}
+
 if (import.meta.main) {
   const PORT = Number(process.env.PORT ?? 8080);
   const systemPrompt =
@@ -141,7 +150,9 @@ if (import.meta.main) {
       llm: { apiKey: requireEnv("OPENAI_API_KEY") },
       tts: {
         apiKey: requireEnv("CARTESIA_API_KEY"),
-        voice: requireEnv("CARTESIA_VOICE"),
+        // Optional: without it the service falls back to its own default
+        // voice, so running the example needs only the three keys.
+        voice: optionalEnv("CARTESIA_VOICE"),
       },
       log: true,
     });

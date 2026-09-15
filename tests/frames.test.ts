@@ -61,6 +61,26 @@ describe("framePriority", () => {
     expect(framePriority(text)).toBe(TIER_PRIORITY.default);
   });
 
+  test("schedules speaking state with the data it describes", () => {
+    // At system tier `userStoppedSpeaking` overtook the `transcript` queued
+    // before it — the very words it marks the end of — so an aggregator would
+    // flush an empty utterance before the text arrived.
+    const stopped = createFrame({ kind: "userStoppedSpeaking" });
+    const transcript = createFrame({ kind: "transcript", text: "hi", final: true });
+
+    expect(framePriority(stopped)).toBe(framePriority(transcript));
+  });
+
+  test("schedules the end-of-reply marker with the text it ends", () => {
+    // Same tier as `llmText`, so a marker queued after the chunks cannot be
+    // dequeued before them. At system tier it would overtake the chunks still
+    // queued behind it and the aggregator would finish the reply early.
+    const text = createFrame({ kind: "llmText", text: "hi" });
+    const ended = createFrame({ kind: "llmTextEnded" });
+
+    expect(framePriority(ended)).toBe(framePriority(text));
+  });
+
   test("gives every frame kind a priority", () => {
     const frames: Frame[] = [
       createFrame({ kind: "start", sampleRateIn: 16000, sampleRateOut: 24000 }),
@@ -77,6 +97,7 @@ describe("framePriority", () => {
       createFrame({ kind: "botStartedSpeaking" }),
       createFrame({ kind: "botStoppedSpeaking" }),
       createFrame({ kind: "llmRun" }),
+      createFrame({ kind: "llmTextEnded" }),
     ];
 
     for (const frame of frames) {
@@ -104,6 +125,13 @@ describe("isInterruptible", () => {
       true,
     );
   });
+
+  test("keeps the end-of-reply marker so the spoken part is still recorded", () => {
+    // An interruption drops the chunks that have not been spoken yet, but the
+    // part that was spoken is still part of the conversation, and this frame is
+    // what tells the aggregator to write it to the context.
+    expect(isInterruptible(createFrame({ kind: "llmTextEnded" }))).toBe(false);
+  });
 });
 
 describe("exhaustiveness", () => {
@@ -126,6 +154,7 @@ describe("exhaustiveness", () => {
         case "botStartedSpeaking":
         case "botStoppedSpeaking":
         case "llmRun":
+        case "llmTextEnded":
           return frame.kind;
       }
     };

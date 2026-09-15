@@ -102,28 +102,12 @@ export abstract class AIService extends FrameProcessor {
       //
       // The branch is reached whenever a handshake is still in flight when the
       // session ends, but it is not load-bearing today: shutdown closes the
-      // queue before aborting this signal, so the wake below finds a closed
-      // queue and the failure is discarded either way. It is kept because the
-      // distinction is real and the cost of losing it is a spurious failure if
-      // that ordering ever changes.
+      // queue before aborting this signal, so the wake inside `fail` finds a
+      // closed queue and the failure is discarded either way. It is kept because
+      // the distinction is real and the cost of losing it is a spurious failure
+      // if that ordering ever changes.
       if (!signal.aborted) {
-        this.#failure = error;
-
-        // Wake the loop so it observes the failure. Without this it would stay
-        // blocked on an empty queue: the frame that triggered the handshake was
-        // already consumed, and clearing the backlog leaves nothing to process.
-        // The loop's next `process` call throws the failure and stops the
-        // pipeline, which is the honest outcome — a stage that silently does
-        // nothing is worse than one that stops.
-        //
-        // Guarded because the loop may have stopped while the handshake was
-        // still running, in which case there is nothing left to fail.
-        try {
-          this.enqueue(createFrame({ kind: "cancel" }));
-        } catch {
-          // The queue is already closed, so the pipeline has stopped and the
-          // failure no longer has anywhere to go.
-        }
+        this.fail(error);
       }
       this.#pending = [];
       return;
@@ -137,7 +121,12 @@ export abstract class AIService extends FrameProcessor {
       return;
     }
 
-    signal.addEventListener("abort", () => connection.close());
+    signal.addEventListener("abort", () => {
+      // Cleared as well as closed, so `connection` does not hand out a socket
+      // that is shutting down.
+      this.#connection = undefined;
+      connection.close();
+    });
     this.#connection = connection;
 
     // This flag is what keeps order. A frame arriving while the loop below
@@ -182,4 +171,48 @@ export abstract class AIService extends FrameProcessor {
    * @param connection The open connection.
    */
   protected abstract handle(frame: Frame, connection: ServiceConnection): Promise<void>;
+
+  /**
+   * The open connection, once the handshake has finished.
+   *
+   * For a subclass that has to send something outside `handle` — cancelling
+   * work in flight when the pipeline is interrupted, for instance, which is not
+   * a frame and so never reaches `handle`. Undefined until the connection is
+   * open, and after it closes.
+   */
+  protected get connection(): ServiceConnection | undefined {
+    return this.#connection;
+  }
+
+  /**
+   * Report a failure and stop the pipeline.
+   *
+   * For failures that happen once the connection is open, which the handshake
+   * cannot report: a provider that rejects a request over the socket, or a
+   * socket that drops mid-session. A stage that silently produces nothing is
+   * worse than one that stops — the session would sit waiting for words that
+   * are never coming.
+   *
+   * Safe to call from a socket handler, which is where these failures usually
+   * surface, and safe to call after the pipeline has already stopped.
+   *
+   * @param error What went wrong.
+   */
+  protected fail(error: unknown): void {
+    this.#failure = error;
+
+    // Wake the loop so it observes the failure. Without this it would stay
+    // blocked on an empty queue: the frame that triggered the connection was
+    // already consumed, and clearing the backlog leaves nothing to process.
+    // The loop's next `process` call throws the failure and stops the pipeline.
+    //
+    // Guarded because the loop may have stopped already, in which case there is
+    // nothing left to fail.
+    try {
+      this.enqueue(createFrame({ kind: "cancel" }));
+    } catch {
+      // The queue is already closed, so the pipeline has stopped and the
+      // failure no longer has anywhere to go.
+    }
+  }
 }

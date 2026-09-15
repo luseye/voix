@@ -17,5 +17,6 @@
 
     "skipLibCheck": true
   },
-  "include": ["src", "tests", "examples"]
+  "include": ["src", "tests", "examples"],
+  "exclude": ["examples/voice-client.ts"]
 }

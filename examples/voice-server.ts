@@ -31,7 +31,10 @@ import { LLMContext } from "../src/core/context.ts";
 import { FrameProcessor } from "../src/core/frame-processor.ts";
 import { Pipeline } from "../src/core/pipeline.ts";
 import { SentenceAggregator } from "../src/core/sentence-aggregator.ts";
+import { TurnController } from "../src/core/turn-controller.ts";
 import { type Frame } from "../src/frames/index.ts";
+import { SileroVAD } from "../src/audio/silero.ts";
+import { VADProcessor } from "../src/audio/vad.ts";
 import { CartesiaTTS, type CartesiaOptions } from "../src/services/cartesia-tts.ts";
 import { DeepgramSTT, type DeepgramOptions } from "../src/services/deepgram-stt.ts";
 import { OpenAILLM, type OpenAIOptions } from "../src/services/openai-llm.ts";
@@ -54,6 +57,16 @@ export interface VoicePipelineOptions {
   readonly stt: DeepgramOptions;
   readonly llm: OpenAIOptions;
   readonly tts: CartesiaOptions;
+  /**
+   * A loaded voice activity detector, for barge-in.
+   *
+   * Optional: without it there is no barge-in, and turn ends come only from
+   * Deepgram's endpointing, as before. It is given ready-made rather than
+   * assembled here because loading the model is asynchronous and this
+   * assembler is deliberately synchronous — the caller awaits `SileroVAD`
+   * once, at startup, where a failure should stop the process anyway.
+   */
+  readonly vad?: VADProcessor;
   /** Whether to print the frames the session handles. Defaults to `false`. */
   readonly log?: boolean;
 }
@@ -88,8 +101,15 @@ export function createVoicePipeline(
 ): Pipeline {
   const context = options.context;
 
+  const vad = options.vad;
+  const turnController = new TurnController({ onInterrupt: () => pipeline.interrupt() });
+
   const stages: FrameProcessor[] = [
     transport.input,
+    // The VAD rides ahead of recognition: it only observes the audio and
+    // forwards it, and it has to see the user's voice before anything else
+    // decides the turn is over. It is where barge-in gets its signal.
+    ...(vad === undefined ? [] : [vad]),
     new DeepgramSTT(options.stt),
     new UserAggregator(context),
     new OpenAILLM(context, options.llm),
@@ -97,6 +117,10 @@ export function createVoicePipeline(
     new CartesiaTTS(options.tts),
     transport.output,
     new AssistantAggregator(context),
+    // The controller sits at the tail, where every speaking-state frame has
+    // already passed: the bot's state from Cartesia, the user's from the VAD.
+    // It observes and forwards, so its position changes nothing downstream.
+    turnController,
   ];
 
   if (options.log === true) {
@@ -106,7 +130,8 @@ export function createVoicePipeline(
     stages.push(new Log("log"));
   }
 
-  return new Pipeline(stages);
+  const pipeline = new Pipeline(stages);
+  return pipeline;
 }
 
 /** Prints what it sees, so a session is visible from the console. */
@@ -142,6 +167,13 @@ if (import.meta.main) {
     process.env.SYSTEM_PROMPT ??
     "You are a helpful voice assistant. Answer briefly and in plain sentences.";
 
+  // Barge-in is enabled by pointing SILERO_VAD_PATH at a Silero model file,
+  // downloaded from the silero-vad repository. The model is loaded once, at
+  // startup, and shared by every session: it is read-only state per window,
+  // and the VAD processor a session gets carries its own recurrent buffer.
+  const modelPath = optionalEnv("SILERO_VAD_PATH");
+  const silero = modelPath === undefined ? undefined : await SileroVAD.create({ modelPath });
+
   const server = new WebSocketServer({ sampleRateIn: 16000, sampleRateOut: 24000 }, (transport) => {
     // A fresh context per connection, so each client is its own conversation.
     return createVoicePipeline(transport, {
@@ -154,6 +186,7 @@ if (import.meta.main) {
         // voice, so running the example needs only the three keys.
         voice: optionalEnv("CARTESIA_VOICE"),
       },
+      vad: silero === undefined ? undefined : new VADProcessor({ source: silero }),
       log: true,
     });
   });

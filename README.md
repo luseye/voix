@@ -30,6 +30,10 @@ reply. A browser only grants microphone access on `localhost` or over HTTPS.
 Set `CARTESIA_VOICE` to speak with a particular voice; without it a default is
 used. `SYSTEM_PROMPT` and `PORT` are also read from the environment.
 
+To talk over the bot and have it stop — barge-in — download a Silero VAD model
+(a ~2 MB `silero_vad.onnx` from the [silero-vad repository](https://github.com/snakers4/silero-vad))
+and point `SILERO_VAD_PATH` at it when starting the server.
+
 To try the transport without any keys, `examples/echo-server.ts` sends audio
 straight back:
 
@@ -65,7 +69,8 @@ the second, so in-flight work stops without the session going with it.
 
 - **Interruptible by design.** Cancellation is explicit and propagates through
   every async operation, so a turn can be cut short without tearing down the
-  session. (Nothing triggers one yet — see **Status**.)
+  session. Barge-in triggers one: confirmed user speech while the bot is
+  talking, past a short echo guard, interrupts the reply.
 - **Composable.** Processors are small and independent; the pipeline is just an
   ordered list.
 - **Provider-agnostic.** STT, LLM, and TTS share one base class, so swapping a
@@ -134,9 +139,10 @@ bun run typecheck
 
 ## Status
 
-Early development. The pipeline runs end to end — speech in, speech out — and
-is being built up in stages; voice activity detection, barge-in, and error
-frames are not in yet.
+Early development. The pipeline runs end to end — speech in, speech out — with
+voice activity detection and barge-in wired in: set `SILERO_VAD_PATH` to a
+Silero model file when starting the server and talking over the bot cuts it
+off. Error frames are not in yet.
 
 ## License
 

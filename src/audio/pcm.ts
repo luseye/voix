@@ -46,3 +46,23 @@ export function writeSamples(samples: Int16Array): Uint8Array {
 
   return bytes;
 }
+
+/**
+ * Read samples as floats in the range -1 to 1.
+ *
+ * Some consumers — the VAD model, a browser's audio graph — work in floats
+ * rather than 16-bit integers. Divided by 32768 rather than 32767, which is
+ * what makes the range symmetric: the most negative sample becomes exactly -1.
+ *
+ * @param samples The 16-bit samples.
+ * @returns The same audio in the float range.
+ */
+export function toFloatSamples(samples: Int16Array): Float32Array {
+  const floats = new Float32Array(samples.length);
+
+  for (let i = 0; i < samples.length; i++) {
+    floats[i] = samples[i]! / 32768;
+  }
+
+  return floats;
+}

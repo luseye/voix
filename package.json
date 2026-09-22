@@ -13,5 +13,8 @@
   },
   "devDependencies": {
     "@types/bun": "^1.4.2"
+  },
+  "dependencies": {
+    "onnxruntime-node": "^1.30.0"
   }
 }

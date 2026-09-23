@@ -172,6 +172,18 @@ export class DeepgramSTT extends AIService {
       socket.addEventListener("open", () => {
         open = true;
 
+        // A socket that drops mid-session must not pass silently: after the
+        // handshake the `error` listener above has nothing left to reject, and
+        // a remote close does not fire an error event at all — only this one.
+        // Without it the transcript would simply stop and the session would
+        // sit waiting for words that are never coming. Closing first is the
+        // session ending on purpose, so it is not a failure.
+        socket.addEventListener("close", () => {
+          if (!signal.aborted) {
+            this.fail(new Error("Deepgram connection lost mid-session"));
+          }
+        });
+
         resolve({
           send: (data) => {
             // Deepgram takes audio as binary and control messages as text.

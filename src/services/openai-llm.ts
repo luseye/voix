@@ -137,7 +137,8 @@ export class OpenAILLM extends FrameProcessor {
   readonly #context: LLMContext;
   readonly #options: OpenAIOptions;
 
-  #failure: unknown;
+  /** Whether a failure has already been reported, so it is reported once. */
+  #failed = false;
 
   /**
    * @param context The conversation to send and to keep up to date.
@@ -151,13 +152,6 @@ export class OpenAILLM extends FrameProcessor {
   }
 
   protected override async process(frame: Frame): Promise<void> {
-    if (this.#failure !== undefined) {
-      // Checked first, so a failed request stops the pipeline on the next frame
-      // whatever it is — including the cancel frame that `#fail` queues to make
-      // sure one arrives.
-      throw this.#failure;
-    }
-
     if (frame.kind === "llmRun") {
       // Consumed rather than forwarded: it is an instruction to this service,
       // and nothing downstream acts on it.
@@ -185,7 +179,7 @@ export class OpenAILLM extends FrameProcessor {
         return;
       }
 
-      this.#fail(error);
+      this.#report(error);
       return;
     }
 
@@ -226,21 +220,20 @@ export class OpenAILLM extends FrameProcessor {
   }
 
   /**
-   * Record a failure and stop the pipeline.
+   * Report a failure as an error frame, and degrade the session.
    *
-   * A model that cannot be reached leaves nothing to say, and a stage that
-   * silently produces no reply is worse than one that stops: the session would
-   * sit waiting for words that are never coming.
+   * A model that cannot be reached leaves this turn without a reply, but the
+   * session itself is fine: the user can speak again, and the next request may
+   * well succeed. Reported once — a dead endpoint fails every request after
+   * it, and a dozen error frames about the same fault would bury the first.
    */
-  #fail(error: unknown): void {
-    this.#failure = error;
-
-    // Wake the loop so it observes the failure. The `llmRun` that triggered
-    // this request has already been consumed, so nothing else will.
-    try {
-      this.enqueue(createFrame({ kind: "cancel" }));
-    } catch {
-      // Already stopped, so the failure has nowhere left to go.
+  #report(error: unknown): void {
+    if (this.#failed) {
+      return;
     }
+    this.#failed = true;
+
+    const message = error instanceof Error ? error.message : String(error);
+    this.push(createFrame({ kind: "error", source: this.name, message }));
   }
 }

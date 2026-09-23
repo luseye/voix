@@ -59,13 +59,28 @@ export type LLMControlFrame =
   | { kind: "llmRun" }
   | { kind: "llmTextEnded" };
 
+/**
+ * A failure somewhere in the pipeline.
+ *
+ * Emitted instead of thrown, so one broken service degrades the session rather
+ * than ending it: a turn whose synthesis failed is a turn with no reply, not a
+ * process to restart. `source` names the stage that failed, which is what an
+ * operator needs to see first.
+ */
+export type ErrorFrame = {
+  kind: "error";
+  source: string;
+  message: string;
+};
+
 /** The body of any frame, before it is given an id. */
 export type FrameBody =
   | SystemFrame
   | AudioFrame
   | TextFrame
   | SpeechFrame
-  | LLMControlFrame;
+  | LLMControlFrame
+  | ErrorFrame;
 
 /** Every frame kind, as a union of string literals. */
 export type FrameKind = FrameBody["kind"];
@@ -148,6 +163,13 @@ const FRAME_SPECS = {
   ttsText: { tier: "default", interruptible: true },
 
   llmRun: { tier: "default", interruptible: true },
+
+  // A failure travels with data, not ahead of it: an error about a turn must
+  // not overtake the frames of that turn still queued ahead of it, or a log
+  // would report the failure before the work it failed on. It survives an
+  // interruption — an error is a fact about what happened, not work that is
+  // now unwanted.
+  error: { tier: "default", interruptible: false },
 
   // Default tier, not system, even though it marks the end of a stream: at
   // system tier it would be dequeued ahead of the `llmText` chunks still

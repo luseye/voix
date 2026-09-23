@@ -132,6 +132,12 @@ describe("isInterruptible", () => {
     // what tells the aggregator to write it to the context.
     expect(isInterruptible(createFrame({ kind: "llmTextEnded" }))).toBe(false);
   });
+
+  test("keeps an error frame through an interruption", () => {
+    // An error is a fact about what happened, not work that is now unwanted,
+    // and an operator chasing a failure cannot afford to lose the report of it.
+    expect(isInterruptible(createFrame({ kind: "error", source: "s", message: "m" }))).toBe(false);
+  });
 });
 
 describe("exhaustiveness", () => {
@@ -155,6 +161,7 @@ describe("exhaustiveness", () => {
         case "botStoppedSpeaking":
         case "llmRun":
         case "llmTextEnded":
+        case "error":
           return frame.kind;
       }
     };

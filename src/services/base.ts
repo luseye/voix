@@ -50,16 +50,10 @@ export abstract class AIService extends FrameProcessor {
   /** Whether the backlog is being delivered, which new frames must not overtake. */
   #draining = false;
 
-  #failure: unknown;
+  /** Whether a failure has already been reported, so it is reported once. */
+  #failed = false;
 
   protected override async process(frame: Frame): Promise<void> {
-    if (this.#failure !== undefined) {
-      // Checked before anything else, so a failure surfaces on the next frame
-      // whatever kind it is — including the cancel frame that `#open` queues
-      // to make sure one arrives.
-      throw this.#failure;
-    }
-
     if (frame.kind === "start") {
       // The start frame is forwarded at once rather than held until the
       // connection opens: a later stage opens its own connection from it, and
@@ -87,7 +81,25 @@ export abstract class AIService extends FrameProcessor {
       return;
     }
 
-    await this.handle(frame, connection);
+    try {
+      await this.handle(frame, connection);
+    } catch (error) {
+      // One bad frame is one turn lost, not a session over: the connection and
+      // the loop stay up, so the next turn can still work. The error frame is
+      // what turns a crash into a degraded session.
+      this.#report(error);
+    }
+  }
+
+  /** Report a failure once, as an error frame addressed downstream. */
+  #report(error: unknown): void {
+    if (this.#failed) {
+      return;
+    }
+    this.#failed = true;
+
+    const message = error instanceof Error ? error.message : String(error);
+    this.push(createFrame({ kind: "error", source: this.name, message }));
   }
 
   /** Open the connection, then deliver whatever arrived while it was opening. */
@@ -97,17 +109,10 @@ export abstract class AIService extends FrameProcessor {
       connection = await this.connect(start, signal);
     } catch (error) {
       // A failure during shutdown is not a failure: the connection was aborted
-      // on purpose, and recording it would report a broken service for a
+      // on purpose, and reporting it would say the service is broken for a
       // session that ended normally.
-      //
-      // The branch is reached whenever a handshake is still in flight when the
-      // session ends, but it is not load-bearing today: shutdown closes the
-      // queue before aborting this signal, so the wake inside `fail` finds a
-      // closed queue and the failure is discarded either way. It is kept because
-      // the distinction is real and the cost of losing it is a spurious failure
-      // if that ordering ever changes.
       if (!signal.aborted) {
-        this.fail(error);
+        this.#report(error);
       }
       this.#pending = [];
       return;
@@ -185,13 +190,17 @@ export abstract class AIService extends FrameProcessor {
   }
 
   /**
-   * Report a failure and stop the pipeline.
+   * Report a failure and degrade the session.
    *
-   * For failures that happen once the connection is open, which the handshake
-   * cannot report: a provider that rejects a request over the socket, or a
-   * socket that drops mid-session. A stage that silently produces nothing is
-   * worse than one that stops — the session would sit waiting for words that
-   * are never coming.
+   * For failures that happen once the connection is open, which `handle`'s own
+   * guard cannot catch: a provider that rejects a request over the socket, or a
+   * socket that drops mid-session. The failure becomes an `error` frame and the
+   * session continues without this service — the turn it was working on is
+   * lost, but the session is not.
+   *
+   * Reported once per connection: a socket that has dropped will fail every
+   * send after it, and a dozen error frames about the same dead socket would
+   * bury whatever came before them.
    *
    * Safe to call from a socket handler, which is where these failures usually
    * surface, and safe to call after the pipeline has already stopped.
@@ -199,20 +208,6 @@ export abstract class AIService extends FrameProcessor {
    * @param error What went wrong.
    */
   protected fail(error: unknown): void {
-    this.#failure = error;
-
-    // Wake the loop so it observes the failure. Without this it would stay
-    // blocked on an empty queue: the frame that triggered the connection was
-    // already consumed, and clearing the backlog leaves nothing to process.
-    // The loop's next `process` call throws the failure and stops the pipeline.
-    //
-    // Guarded because the loop may have stopped already, in which case there is
-    // nothing left to fail.
-    try {
-      this.enqueue(createFrame({ kind: "cancel" }));
-    } catch {
-      // The queue is already closed, so the pipeline has stopped and the
-      // failure no longer has anywhere to go.
-    }
+    this.#report(error);
   }
 }

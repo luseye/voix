@@ -83,6 +83,11 @@ export class FakeDeepgram {
     this.#socket?.send(payload);
   }
 
+  /** Drop the socket to the client, as a network failure would. */
+  drop(): void {
+    this.#socket?.close(1006, "connection dropped");
+  }
+
   stop(): void {
     this.#server.stop(true);
   }
@@ -249,6 +254,11 @@ export class FakeCartesia {
   /** Send a payload that is not JSON at all. */
   sendRaw(payload: string): void {
     this.#socket?.send(payload);
+  }
+
+  /** Drop the socket to the client, as a network failure would. */
+  drop(): void {
+    this.#socket?.close(1006, "connection dropped");
   }
 
   stop(): void {

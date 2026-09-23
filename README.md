@@ -142,7 +142,8 @@ bun run typecheck
 Early development. The pipeline runs end to end — speech in, speech out — with
 voice activity detection and barge-in wired in: set `SILERO_VAD_PATH` to a
 Silero model file when starting the server and talking over the bot cuts it
-off. Error frames are not in yet.
+off. A failing service is degraded rather than fatal — it reports an `error`
+frame and the session continues without it.
 
 ## License
 

@@ -204,6 +204,18 @@ export class CartesiaTTS extends AIService {
       });
 
       socket.addEventListener("open", () => {
+        // A socket that drops mid-session must not pass silently: after the
+        // handshake the `error` listener above has nothing left to reject, and
+        // a remote close does not fire an error event at all — only this one.
+        // Without it the audio would simply stop and the session would sit
+        // waiting for speech that is never coming. Closing first is the
+        // session ending on purpose, so it is not a failure.
+        socket.addEventListener("close", () => {
+          if (!signal.aborted) {
+            this.fail(new Error("Cartesia connection lost mid-session"));
+          }
+        });
+
         resolve({
           send: (data) => {
             socket.send(data);

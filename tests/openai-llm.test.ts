@@ -337,30 +337,50 @@ describe("OpenAILLM", () => {
     await running;
   });
 
-  test("stops the pipeline when the request fails", async () => {
+  test("reports a failed request as an error frame, and the session lives", async () => {
     const openai = fakeOpenAI();
     openai.fail(500);
+    const spy = new Spy("spy");
     const llm = new OpenAILLM(new LLMContext(), { apiKey: "k", url: openai.url });
-    const pipeline = new Pipeline([llm]);
+    const pipeline = new Pipeline([llm, spy]);
     const running = pipeline.start(RATES);
 
     pipeline.push(createFrame({ kind: "llmRun" }));
+    await until(() => spy.kinds.includes("error"));
 
-    await expect(running).rejects.toThrow("OpenAI request failed with status 500");
+    const error = spy.seen.find((frame) => frame.kind === "error");
+    expect(error).toMatchObject({
+      kind: "error",
+      source: "OpenAILLM",
+      message: "OpenAI request failed with status 500",
+    });
+
+    // The session survives: the pipeline can still be stopped cleanly.
+    await pipeline.stop();
+    await running;
   });
 
-  test("stops the pipeline when the request fails and no frame follows", async () => {
-    // The `llmRun` that started the request is consumed, so nothing else will
-    // wake the loop. Without the wake the pipeline would wait forever.
+  test("reports the failure once even when every later request fails too", async () => {
+    // A dead endpoint fails every request, and a dozen error frames about the
+    // same fault would bury the first one, so only the first is reported.
     const openai = fakeOpenAI();
     openai.fail(401);
+    const spy = new Spy("spy");
     const llm = new OpenAILLM(new LLMContext(), { apiKey: "k", url: openai.url });
-    const pipeline = new Pipeline([llm]);
+    const pipeline = new Pipeline([llm, spy]);
     const running = pipeline.start(RATES);
 
     pipeline.push(createFrame({ kind: "llmRun" }));
+    await until(() => spy.kinds.includes("error"));
 
-    await expect(running).rejects.toThrow("OpenAI request failed with status 401");
+    pipeline.push(createFrame({ kind: "llmRun" }));
+    pipeline.push(createFrame({ kind: "llmRun" }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(spy.kinds.filter((kind) => kind === "error")).toHaveLength(1);
+
+    await pipeline.stop();
+    await running;
   });
 
   test("defaults to the real endpoint", () => {

@@ -407,14 +407,65 @@ describe("DeepgramSTT", () => {
     expect(deepgram.control).toContain(JSON.stringify({ type: "CloseStream" }));
   });
 
-  test("reports a connection failure by stopping the pipeline", async () => {
+  test("reports a connection failure as an error frame", async () => {
     // Nothing is listening on this port.
     const stt = new DeepgramSTT({ apiKey: "k", url: "ws://localhost:1/v1/listen" });
-    const pipeline = new Pipeline([stt]);
+    const seen: Frame[] = [];
+
+    class Sink extends FrameProcessor {
+      protected override async process(frame: Frame): Promise<void> {
+        seen.push(frame);
+      }
+    }
+
+    const sink = new Sink("sink");
+    const pipeline = new Pipeline([stt, sink]);
     const running = pipeline.start(RATES);
 
     pipeline.push(createFrame({ kind: "inputAudio", data: Int16Array.from([1]) }));
 
-    await expect(running).rejects.toThrow("could not connect to Deepgram");
+    await until(() => seen.some((frame) => frame.kind === "error"));
+    const error = seen.find((frame) => frame.kind === "error");
+    expect(error).toMatchObject({
+      kind: "error",
+      source: "DeepgramSTT",
+      message: "could not connect to Deepgram",
+    });
+
+    await pipeline.stop();
+    await running;
+  });
+
+  test("reports a socket dropped mid-session as an error frame", async () => {
+    // After the handshake the connection cannot fail a promise any more, so
+    // the drop has to be reported through the pipeline instead of silently
+    // ending the transcript.
+    const deepgram = new FakeDeepgram();
+    const stt = new DeepgramSTT({ apiKey: "k", url: deepgram.url });
+    const seen: Frame[] = [];
+
+    class Sink extends FrameProcessor {
+      protected override async process(frame: Frame): Promise<void> {
+        seen.push(frame);
+      }
+    }
+
+    const sink = new Sink("sink");
+    const pipeline = new Pipeline([stt, sink]);
+    const running = pipeline.start(RATES);
+    await until(() => deepgram.authHeaders.length === 1);
+
+    deepgram.drop();
+    await until(() => seen.some((frame) => frame.kind === "error"));
+
+    const error = seen.find((frame) => frame.kind === "error");
+    expect(error).toMatchObject({
+      kind: "error",
+      source: "DeepgramSTT",
+      message: "Deepgram connection lost mid-session",
+    });
+
+    await pipeline.stop();
+    await running;
   });
 });

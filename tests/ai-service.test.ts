@@ -34,6 +34,12 @@ class TestService extends AIService {
   /** How long `handle` takes, to open a window in which a frame can arrive. */
   #delay: number;
   #connect: (start: StartFrame, signal: AbortSignal) => Promise<ServiceConnection>;
+  /**
+   * An optional behaviour to run instead of the default `handle`, set from
+   * tests that need one frame to fail. Returning without throwing keeps the
+   * default behaviour.
+   */
+  overrideHandle: ((frame: Frame, connection: ServiceConnection) => Promise<void>) | undefined;
 
   constructor(
     connect?: (start: StartFrame, signal: AbortSignal) => Promise<ServiceConnection>,
@@ -50,6 +56,11 @@ class TestService extends AIService {
   }
 
   protected override async handle(frame: Frame, connection: ServiceConnection): Promise<void> {
+    if (this.overrideHandle !== undefined) {
+      await this.overrideHandle(frame, connection);
+      return;
+    }
+
     if (this.#delay > 0) {
       await new Promise((resolve) => setTimeout(resolve, this.#delay));
     }
@@ -280,31 +291,96 @@ describe("AIService", () => {
   });
 
   describe("failure", () => {
-    test("stops the pipeline when the connection cannot be made", async () => {
+    test("reports a failed handshake as an error frame, and the session lives", async () => {
       const service = new TestService(() => Promise.reject(new Error("no connection")));
-      const pipeline = new Pipeline([service]);
+      const seen: Frame[] = [];
+
+      class Sink extends FrameProcessor {
+        protected override async process(frame: Frame): Promise<void> {
+          seen.push(frame);
+        }
+      }
+
+      const sink = new Sink("sink");
+      const pipeline = new Pipeline([service, sink]);
       const running = pipeline.start(RATES);
 
-      pipeline.push(createFrame({ kind: "inputAudio", data: Int16Array.from([1]) }));
+      pipeline.push(createFrame({ kind: "userStartedSpeaking" }));
+      await until(() => seen.some((frame) => frame.kind === "error"));
+      const error = seen.find((frame) => frame.kind === "error");
+      expect(error).toMatchObject({ kind: "error", source: "service", message: "no connection" });
 
-      await expect(running).rejects.toThrow("no connection");
+      // The loop is still alive: an end frame is honoured and the run resolves,
+      // which a stopped pipeline could not do. The audio frame itself is held
+      // forever — the connection never opened, so there is nothing to deliver
+      // it to — but waiting on it would be waiting on nothing.
+      await pipeline.stop();
+      await running;
     });
 
-    test("stops the pipeline even when no frame follows the failed handshake", async () => {
-      // The frame that starts the handshake is consumed, so nothing is left in
-      // the queue once it fails. The service has to wake the loop itself, or
-      // the pipeline would wait forever on an empty queue.
-      const service = new TestService(() => Promise.reject(new Error("no connection")));
-      const pipeline = new Pipeline([service]);
+    test("reports a failure from handle as an error frame, and keeps delivering", async () => {
+      const service = new TestService();
+      let calls = 0;
+      service.overrideHandle = async (
+        frame: Frame,
+        connection: ServiceConnection,
+      ): Promise<void> => {
+        calls++;
+        if (calls === 1) {
+          // Recorded before throwing, so the test can see the frame arrived.
+          service.handled.push(frame);
+          throw new Error("provider rejected the request");
+        }
+        connection.send(frame.kind);
+      };
+
+      const seen: Frame[] = [];
+      class Sink extends FrameProcessor {
+        protected override async process(frame: Frame): Promise<void> {
+          seen.push(frame);
+        }
+      }
+
+      const sink = new Sink("sink");
+      const pipeline = new Pipeline([service, sink]);
       const running = pipeline.start(RATES);
 
-      await expect(running).rejects.toThrow("no connection");
+      // The first frame fails; the second is delivered to the connection.
+      pipeline.push(createFrame({ kind: "userStartedSpeaking" }));
+      pipeline.push(createFrame({ kind: "userStoppedSpeaking" }));
+      await until(() => seen.some((frame) => frame.kind === "error"));
+      expect(seen.find((frame) => frame.kind === "error")).toMatchObject({
+        source: "service",
+        message: "provider rejected the request",
+      });
+      await until(() => service.fake.sent.includes("userStoppedSpeaking"));
+
+      // A second failure is the same degraded session, so it is not reported
+      // again: a dozen error frames about one dead service would bury the
+      // first, which is the one an operator needs to see.
+      service.overrideHandle = async (): Promise<void> => {
+        throw new Error("a second failure");
+      };
+      pipeline.push(createFrame({ kind: "userStartedSpeaking" }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(seen.filter((frame) => frame.kind === "error")).toHaveLength(1);
+
+      await pipeline.stop();
+      await running;
     });
 
     test("does not report a failure caused by shutdown", async () => {
       const gated = gatedConnection(new FakeConnection());
       const service = new TestService(gated.connect);
-      const pipeline = new Pipeline([service]);
+      const seen: Frame[] = [];
+      class Sink extends FrameProcessor {
+        protected override async process(frame: Frame): Promise<void> {
+          seen.push(frame);
+        }
+      }
+
+      const sink = new Sink("sink");
+      const pipeline = new Pipeline([service, sink]);
       const running = pipeline.start(RATES);
       await until(() => gated.started());
 
@@ -313,6 +389,8 @@ describe("AIService", () => {
       // broken service for a session that ended normally.
       await pipeline.stop();
       await running;
+
+      expect(seen.some((frame) => frame.kind === "error")).toBe(false);
     });
   });
 });

@@ -506,10 +506,19 @@ describe("CartesiaTTS", () => {
     await running;
   });
 
-  test("stops the pipeline when Cartesia reports an error", async () => {
+  test("reports a Cartesia error as an error frame, and the session lives", async () => {
     const cartesia = fakeCartesia();
     const tts = new CartesiaTTS({ apiKey: "k", voice: "v", url: cartesia.url });
-    const pipeline = new Pipeline([tts]);
+    const seen: Frame[] = [];
+
+    class Sink extends FrameProcessor {
+      protected override async process(frame: Frame): Promise<void> {
+        seen.push(frame);
+      }
+    }
+
+    const sink = new Sink("sink");
+    const pipeline = new Pipeline([tts, sink]);
     const running = pipeline.start(RATES);
     await until(() => cartesia.apiKeys.length === 1);
 
@@ -525,8 +534,17 @@ describe("CartesiaTTS", () => {
       context_id: cartesia.lastContextId,
     });
 
-    const error = await rejection(running);
-    expect((error as Error).message).toBe("Invalid model: The model is not valid.");
+    await until(() => seen.some((frame) => frame.kind === "error"));
+    const error = seen.find((frame) => frame.kind === "error");
+    expect(error).toMatchObject({
+      kind: "error",
+      source: "CartesiaTTS",
+      message: "Invalid model: The model is not valid.",
+    });
+
+    // The session survives the failure and can still be stopped cleanly.
+    await pipeline.stop();
+    await running;
   });
 
   test("ignores an error for a context it already cancelled", async () => {
@@ -553,14 +571,65 @@ describe("CartesiaTTS", () => {
     await running;
   });
 
-  test("reports a connection failure by stopping the pipeline", async () => {
+  test("reports a connection failure as an error frame", async () => {
     // Nothing is listening on this port.
     const tts = new CartesiaTTS({ apiKey: "k", voice: "v", url: "ws://localhost:1/tts/websocket" });
-    const pipeline = new Pipeline([tts]);
+    const seen: Frame[] = [];
+
+    class Sink extends FrameProcessor {
+      protected override async process(frame: Frame): Promise<void> {
+        seen.push(frame);
+      }
+    }
+
+    const sink = new Sink("sink");
+    const pipeline = new Pipeline([tts, sink]);
     const running = pipeline.start(RATES);
 
     pipeline.push(createFrame({ kind: "ttsText", text: "Hi." }));
 
-    await expect(running).rejects.toThrow("could not connect to Cartesia");
+    await until(() => seen.some((frame) => frame.kind === "error"));
+    const error = seen.find((frame) => frame.kind === "error");
+    expect(error).toMatchObject({
+      kind: "error",
+      source: "CartesiaTTS",
+      message: "could not connect to Cartesia",
+    });
+
+    await pipeline.stop();
+    await running;
+  });
+
+  test("reports a socket dropped mid-session as an error frame", async () => {
+    // After the handshake the connection cannot fail a promise any more, so
+    // the drop has to be reported through the pipeline instead of silently
+    // ending the audio.
+    const cartesia = fakeCartesia();
+    const tts = new CartesiaTTS({ apiKey: "k", voice: "v", url: cartesia.url });
+    const seen: Frame[] = [];
+
+    class Sink extends FrameProcessor {
+      protected override async process(frame: Frame): Promise<void> {
+        seen.push(frame);
+      }
+    }
+
+    const sink = new Sink("sink");
+    const pipeline = new Pipeline([tts, sink]);
+    const running = pipeline.start(RATES);
+    await until(() => cartesia.apiKeys.length === 1);
+
+    cartesia.drop();
+    await until(() => seen.some((frame) => frame.kind === "error"));
+
+    const error = seen.find((frame) => frame.kind === "error");
+    expect(error).toMatchObject({
+      kind: "error",
+      source: "CartesiaTTS",
+      message: "Cartesia connection lost mid-session",
+    });
+
+    await pipeline.stop();
+    await running;
   });
 });

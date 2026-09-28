@@ -29,6 +29,7 @@
 import { UserAggregator, AssistantAggregator } from "../src/core/aggregators.ts";
 import { LLMContext } from "../src/core/context.ts";
 import { FrameProcessor } from "../src/core/frame-processor.ts";
+import { LatencyObserver } from "../src/core/latency-observer.ts";
 import { Pipeline } from "../src/core/pipeline.ts";
 import { SentenceAggregator } from "../src/core/sentence-aggregator.ts";
 import { TurnController } from "../src/core/turn-controller.ts";
@@ -103,6 +104,13 @@ export function createVoicePipeline(
 
   const vad = options.vad;
   const turnController = new TurnController({ onInterrupt: () => pipeline.interrupt() });
+  // A new observer per session, so the numbers are one conversation's and not
+  // a mixture of every session the server has ever run.
+  const latency = new LatencyObserver({
+    onSample: (sample) => {
+      console.log(`[latency] reply heard after ${sample.ms} ms`);
+    },
+  });
 
   const stages: FrameProcessor[] = [
     transport.input,
@@ -121,6 +129,7 @@ export function createVoicePipeline(
     // already passed: the bot's state from Cartesia, the user's from the VAD.
     // It observes and forwards, so its position changes nothing downstream.
     turnController,
+    latency,
   ];
 
   if (options.log === true) {
@@ -132,6 +141,30 @@ export function createVoicePipeline(
 
   const pipeline = new Pipeline(stages);
   return pipeline;
+}
+
+/**
+ * How often the server prints the latency summary, in milliseconds.
+ *
+ * Long enough that a summary is worth reading, short enough that a running
+ * session shows its numbers without waiting to be closed.
+ */
+const LATENCY_REPORT_INTERVAL_MS = 30_000;
+
+/**
+ * Find the latency observer in an assembled pipeline.
+ *
+ * The observer is built inside `createVoicePipeline`, so the interval that
+ * reports the running summary needs this to reach it. `undefined` means the
+ * pipeline was assembled without one, which nothing here can act on.
+ *
+ * @param pipeline The pipeline to look in.
+ * @returns The observer, or `undefined` if there is none.
+ */
+export function latencyObserverOf(pipeline: Pipeline): LatencyObserver | undefined {
+  return pipeline.processors.find((processor): processor is LatencyObserver =>
+    processor instanceof LatencyObserver,
+  );
 }
 
 /** Prints what it sees, so a session is visible from the console. */
@@ -195,5 +228,22 @@ if (import.meta.main) {
   // `http://localhost:PORT` in a browser is the whole client. A microphone
   // needs a secure context, which `http://localhost` counts as.
   serve(server, { port: PORT, path: "/voice", page });
+
+  // A running summary of what latency is like right now, per live session.
+  // The per-turn lines above are the individual numbers; this is their shape
+  // over time, which is what tells a slow provider from a bad turn.
+  const reporter = setInterval(() => {
+    for (const pipeline of server.pipelines) {
+      const report = latencyObserverOf(pipeline)?.report;
+      if (report !== undefined) {
+        console.log(
+          `[latency] ${report.count} replies, min ${Math.round(report.min)} ms, ` +
+            `avg ${Math.round(report.avg)} ms, max ${Math.round(report.max)} ms`,
+        );
+      }
+    }
+  }, LATENCY_REPORT_INTERVAL_MS);
+  reporter.unref();
+
   console.log(`open http://localhost:${PORT} and press the button`);
 }

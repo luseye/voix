@@ -143,7 +143,9 @@ Early development. The pipeline runs end to end — speech in, speech out — wi
 voice activity detection and barge-in wired in: set `SILERO_VAD_PATH` to a
 Silero model file when starting the server and talking over the bot cuts it
 off. A failing service is degraded rather than fatal — it reports an `error`
-frame and the session continues without it.
+frame and the session continues without it. The server measures how long a
+reply takes to be heard — the gap from the user stopping to the first audio —
+per turn, with a running summary every 30 seconds.
 
 ## License
 

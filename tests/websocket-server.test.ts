@@ -66,6 +66,21 @@ describe("WebSocketServer", () => {
     expect(server.sessionCount).toBe(0);
   });
 
+  test("exposes the pipelines of live sessions", async () => {
+    // A monitor that wants to inspect every running pipeline — a latency
+    // summary, for instance — needs a way in that tracks connects and
+    // disconnects.
+    const server = new WebSocketServer(CONFIG, (transport) => new Pipeline([transport.input]));
+    expect(server.pipelines).toHaveLength(0);
+
+    const socket = new FakeSocket();
+    const pipeline = server.handleOpen(socket);
+    expect(server.pipelines).toEqual([pipeline]);
+
+    server.handleClose(socket);
+    expect(server.pipelines).toHaveLength(0);
+  });
+
   test("carries audio from a connection to its session", async () => {
     let spy: Spy | undefined;
     const server = new WebSocketServer(CONFIG, (transport) => {

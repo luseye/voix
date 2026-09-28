@@ -53,6 +53,11 @@ export class WebSocketServer {
     return this.#sessions.size;
   }
 
+  /** The pipelines of every live session, in connection order. */
+  get pipelines(): readonly Pipeline[] {
+    return [...this.#sessions.values()].map((session) => session.pipeline);
+  }
+
   /**
    * Start a session for a new connection.
    *
